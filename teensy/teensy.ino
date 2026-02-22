@@ -3,14 +3,11 @@
 #define NUM_TX_MAILBOXES 32
 #define NUM_RX_MAILBOXES 32
 // Robostride O2: extended 29-bit CAN ID (id:8, data:16, mode:5)
-#define USE_ROBOSTRIDE_O2 1
-#if USE_ROBOSTRIDE_O2
 #define CANCOM_MOTOR_CTRL     1
 #define CANCOM_MOTOR_FEEDBACK 2
 #define CANCOM_MOTOR_IN       3
 #define CANCOM_MOTOR_RESET    4
 #define CANCOM_MOTOR_ZERO     6
-#endif
 using namespace qindesign::network;
 
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can0;
@@ -40,7 +37,6 @@ unsigned int packet_count_bus2[MAX_NODES] = {0};
 bool first_packet_recv = false;
 const uint8_t RESET_COMMAND = 0xFF;
 
-#if USE_ROBOSTRIDE_O2
 static uint8_t getO2ModeFromPayload(const uint8_t *buf) {
   if (buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF &&
       buf[4] == 0xFF && buf[5] == 0xFF && buf[6] == 0xFF) {
@@ -53,7 +49,6 @@ static uint8_t getO2ModeFromPayload(const uint8_t *buf) {
 static uint32_t makeO2ExtendedId(uint8_t node_id_1based, uint8_t mode) {
   return ((uint32_t)(node_id_1based & 0xFF) << 21) | ((uint32_t)(mode & 0x1F));
 }
-#endif
 
 // Calculate CRC-8 checksum
 // CRC-8 polynomial (Dallas/Maxim)
@@ -166,19 +161,12 @@ void printIPAddress()
 void canReceive(const CAN_message_t &msg)
 {
     if (msg.len != 8) return;
-#if USE_ROBOSTRIDE_O2
-    int node_id;
-    if (msg.flags.extended) {
-      uint32_t mode = msg.id & 0x1F;
-      if (mode != CANCOM_MOTOR_FEEDBACK) return;
-      node_id = (msg.id >> 21) & 0xFF;
-      node_id = node_id - 1;
-    } else
-      node_id = msg.buf[0] - 1;
+    if (!msg.flags.extended) return;
+    uint32_t mode = msg.id & 0x1F;
+    if (mode != CANCOM_MOTOR_FEEDBACK) return;
+    int node_id = (msg.id >> 21) & 0xFF;
+    node_id = node_id - 1;
     if (node_id < 0 || node_id >= MAX_NODES) return;
-#else
-    int node_id = msg.buf[0] - 1;
-#endif
     memcpy(can_data[node_id], msg.buf, 8);
     if (node_id >= 0 && node_id < MAX_NODES)
     {
@@ -202,19 +190,12 @@ void canReceive(const CAN_message_t &msg)
 void canReceive2(const CAN_message_t &msg)
 {
     if (msg.len != 8) return;
-#if USE_ROBOSTRIDE_O2
-    int node_id;
-    if (msg.flags.extended) {
-      uint32_t mode = msg.id & 0x1F;
-      if (mode != CANCOM_MOTOR_FEEDBACK) return;
-      node_id = (msg.id >> 21) & 0xFF;
-      node_id = node_id - 1;
-    } else
-      node_id = msg.buf[0] - 1;
+    if (!msg.flags.extended) return;
+    uint32_t mode = msg.id & 0x1F;
+    if (mode != CANCOM_MOTOR_FEEDBACK) return;
+    int node_id = (msg.id >> 21) & 0xFF;
+    node_id = node_id - 1;
     if (node_id < 0 || node_id >= MAX_NODES) return;
-#else
-    int node_id = msg.buf[0] - 1;
-#endif
     memcpy(can_data_bus2[node_id], msg.buf, 8);
     if (node_id >= 0 && node_id < MAX_NODES)
     {
@@ -345,8 +326,6 @@ void sendCANCMD()
         CAN_message_t msg;
         CAN_message_t msg2;
         uint8_t node_id_1based = i + 1;
-
-#if USE_ROBOSTRIDE_O2
         uint8_t mode0 = getO2ModeFromPayload(can_command[i]);
         uint8_t mode1 = getO2ModeFromPayload(can_command_bus2[i]);
 
@@ -357,15 +336,6 @@ void sendCANCMD()
         msg2.flags.extended = 1;
         msg2.id = makeO2ExtendedId(node_id_1based, mode1);
         msg2.len = 8;
-#else
-        msg.flags.extended = 0;
-        msg.id = node_id_1based;
-        msg.len = 8;
-
-        msg2.flags.extended = 0;
-        msg2.id = node_id_1based;
-        msg2.len = 8;
-#endif
 
         memcpy(msg.buf, can_command[i], 8);
         memcpy(msg2.buf, can_command_bus2[i], 8);

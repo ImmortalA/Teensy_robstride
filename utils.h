@@ -1,38 +1,6 @@
 #ifndef SPINE_UTILS_H
 #define SPINE_UTILS_H
 #include <cmath>
-#define P_MIN_AK_10_9 -12.5f
-#define P_MAX_AK_10_9 12.5f
-#define V_MIN_AK_10_9 -50.0f
-#define V_MAX_AK_10_9 50.0f
-#define KP_MIN_AK_10_9 0.0f
-#define KP_MAX_AK_10_9 500.0f
-#define KD_MIN_AK_10_9 0.0f
-#define KD_MAX_AK_10_9 5.0f
-#define T_MIN_AK_10_9 -65.0f
-#define T_MAX_AK_10_9 65.0f
-
-#define P_MIN_AK_60_6 -12.5f
-#define P_MAX_AK_60_6 12.5f
-#define V_MIN_AK_60_6 -45.0f
-#define V_MAX_AK_60_6 45.0f
-#define KP_MIN_AK_60_6 0.0f
-#define KP_MAX_AK_60_6 500.0f
-#define KD_MIN_AK_60_6 0.0f
-#define KD_MAX_AK_60_6 5.0f
-#define T_MIN_AK_60_6 -15.0f
-#define T_MAX_AK_60_6 15.0f
-
-#define P_MIN_AK_80_9 -12.5f
-#define P_MAX_AK_80_9 12.5f
-#define V_MIN_AK_80_9 -50.0f
-#define V_MAX_AK_80_9 50.0f
-#define KP_MIN_AK_80_9 0.0f
-#define KP_MAX_AK_80_9 500.0f
-#define KD_MIN_AK_80_9 0.0f
-#define KD_MAX_AK_80_9 5.0f
-#define T_MIN_AK_80_9 -18.0f
-#define T_MAX_AK_80_9 18.0f
 
 // Robostride O2 (extended CAN protocol: id|data|mode in 29-bit ID)
 #define P_MIN_ROBOSTRIDE_O2 -12.5f
@@ -55,9 +23,6 @@ const uint8_t CRC8_POLYNOMIAL = 0x31;
 
 enum class ActuatorType
 {
-    AK_10_9,
-    AK_60_6,
-    AK_80_9,
     ROBOSTRIDE_O2,
 };
 
@@ -81,27 +46,6 @@ ActuatorParams getActuatorParams(ActuatorType type)
 {
     switch (type)
     {
-    case ActuatorType::AK_10_9:
-        return {
-            P_MIN_AK_10_9, P_MAX_AK_10_9,
-            V_MIN_AK_10_9, V_MAX_AK_10_9,
-            KP_MIN_AK_10_9, KP_MAX_AK_10_9,
-            KD_MIN_AK_10_9, KD_MAX_AK_10_9,
-            T_MIN_AK_10_9, T_MAX_AK_10_9};
-    case ActuatorType::AK_60_6:
-        return {
-            P_MIN_AK_60_6, P_MAX_AK_60_6,
-            V_MIN_AK_60_6, V_MAX_AK_60_6,
-            KP_MIN_AK_60_6, KP_MAX_AK_60_6,
-            KD_MIN_AK_60_6, KD_MAX_AK_60_6,
-            T_MIN_AK_60_6, T_MAX_AK_60_6};
-    case ActuatorType::AK_80_9:
-        return {
-            P_MIN_AK_80_9, P_MAX_AK_80_9,
-            V_MIN_AK_80_9, V_MAX_AK_80_9,
-            KP_MIN_AK_80_9, KP_MAX_AK_80_9,
-            KD_MIN_AK_80_9, KD_MAX_AK_80_9,
-            T_MIN_AK_80_9, T_MAX_AK_80_9};
     case ActuatorType::ROBOSTRIDE_O2:
         return {
             P_MIN_ROBOSTRIDE_O2, P_MAX_ROBOSTRIDE_O2,
