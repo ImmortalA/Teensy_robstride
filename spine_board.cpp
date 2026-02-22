@@ -8,11 +8,12 @@ SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int 
       first_state_received(false), bus_list(buses),
       sock_send(io_context), server_socket(io_context), board_name(_board_name)
 {
-    // Find the enp1s0 interface IP address
-    asio::ip::address_v4 enp1s0_address;
+    // Find the requested interface IP, or first non-loopback IPv4 interface as fallback
+    asio::ip::address_v4 bind_address;
     struct ifaddrs *ifaddr, *ifa;
     int family, s;
     char host[NI_MAXHOST];
+    bool found = false;
 
     if (getifaddrs(&ifaddr) == -1)
     {
@@ -36,26 +37,52 @@ SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int 
                 printf("getnameinfo() failed: %s\n", gai_strerror(s));
                 exit(EXIT_FAILURE);
             }
-            enp1s0_address = asio::ip::make_address_v4(host);
+            bind_address = asio::ip::make_address_v4(host);
+            found = true;
+            break;
+        }
+    }
+
+    // Fallback: first non-loopback IPv4 interface (e.g. eth0, enp0s3 when eno1 missing)
+    if (!found)
+    {
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+        {
+            if (ifa->ifa_addr == NULL)
+                continue;
+            family = ifa->ifa_addr->sa_family;
+            if (family != AF_INET)
+                continue;
+            s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in),
+                            host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            if (s != 0)
+                continue;
+            asio::ip::address_v4 addr = asio::ip::make_address_v4(host);
+            if (addr.is_loopback())
+                continue;
+            bind_address = addr;
+            found = true;
+            std::cout << "Interface '" << interface << "' not found, using " << ifa->ifa_name
+                      << " (" << host << ")" << std::endl;
             break;
         }
     }
 
     freeifaddrs(ifaddr);
 
-    if (enp1s0_address.is_unspecified())
+    if (!found || bind_address.is_unspecified())
     {
-        std::cerr << "Failed to find the " << interface << " interface IP address" << std::endl;
-        throw std::runtime_error("Failed to find the enp1s0 interface IP address");
+        std::cerr << "Failed to find the " << interface << " interface IP address (no fallback)" << std::endl;
+        throw std::runtime_error("Failed to find network interface IP address");
     }
 
-    // Bind the sending socket to the enp1s0 interface
+    // Bind the sending socket to the chosen interface
     sock_send.open(asio::ip::udp::v4());
-    sock_send.bind(asio::ip::udp::endpoint(enp1s0_address, 0));
+    sock_send.bind(asio::ip::udp::endpoint(bind_address, 0));
 
-    // Bind the server socket to the enp1s0 interface
+    // Bind the server socket to the chosen interface
     server_socket.open(asio::ip::udp::v4());
-    server_socket.bind(asio::ip::udp::endpoint(enp1s0_address, teensy_port));
+    server_socket.bind(asio::ip::udp::endpoint(bind_address, teensy_port));
 
     std::cout << "Server bound to " << server_socket.local_endpoint() << std::endl;
 
