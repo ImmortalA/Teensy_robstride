@@ -150,27 +150,17 @@ float wrap_angle(float angle) {
     return fmodf(angle - WRAP_MIN, WRAP_RANGE) + WRAP_MIN;
 }
 
+// MIT-style: 16b p + 12b v + 12b Kp + 12b Kd + 12b torque (used if motor is in MIT protocol)
 void pack_cmd(uint8_t *msg, bus &bus, const int node_id)
 {
     auto &joint = bus.command.j[node_id];
     auto &params = bus.params[node_id];
-    // auto params = bus.params_vec[node_id];
-
-    // auto params_vec = bus.params_vec[node_id];
-
-    // float p_des_wrapped = wrap_angle(joint.p_des);
 
     float p_des = sb_fminf(sb_fmaxf(params.p_min, joint.p_des), params.p_max);
     float v_des = sb_fminf(sb_fmaxf(params.v_min, joint.v_des), params.v_max);
     float kp = sb_fminf(sb_fmaxf(params.kp_min, joint.kp), params.kp_max);
     float kd = sb_fminf(sb_fmaxf(params.kd_min, joint.kd), params.kd_max);
     float t_ff = sb_fminf(sb_fmaxf(params.t_min, joint.t_ff), params.t_max);
-
-    // uint16_t p_int = float_to_uint(p_des, params.p_min, params.p_max, 16);
-    // uint16_t v_int = float_to_uint(v_des, params.v_min, params.v_max, 12);
-    // uint16_t kp_int = float_to_uint(kp, params.kp_min, params.kp_max, 12);
-    // uint16_t kd_int = float_to_uint(kd, params.kd_min, params.kd_max, 12);
-    // uint16_t t_int = float_to_uint(t_ff, params.t_min, params.t_max, 12);
 
     int p_int = float_to_uint(p_des, params.p_min, params.p_max, 16);
     int v_int = float_to_uint(v_des, params.v_min, params.v_max, 12);
@@ -186,6 +176,33 @@ void pack_cmd(uint8_t *msg, bus &bus, const int node_id)
     msg[5] = kd_int >> 4;
     msg[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     msg[7] = t_int & 0xFF;
+}
+
+// Robostride O2 Private protocol Type 1 (manual 4.1.2): 4×16-bit (p, v, Kp, Kd), no torque. High byte first.
+// Use this when the motor is in Private protocol (extended 29-bit ID).
+void pack_cmd_private_o2(uint8_t *msg, bus &bus, const int node_id)
+{
+    auto &joint = bus.command.j[node_id];
+    auto &params = bus.params[node_id];
+
+    float p_des = sb_fminf(sb_fmaxf(params.p_min, joint.p_des), params.p_max);
+    float v_des = sb_fminf(sb_fmaxf(params.v_min, joint.v_des), params.v_max);
+    float kp = sb_fminf(sb_fmaxf(params.kp_min, joint.kp), params.kp_max);
+    float kd = sb_fminf(sb_fmaxf(params.kd_min, joint.kd), params.kd_max);
+
+    int p_int = float_to_uint(p_des, params.p_min, params.p_max, 16);
+    int v_int = float_to_uint(v_des, params.v_min, params.v_max, 16);
+    int kp_int = float_to_uint(kp, params.kp_min, params.kp_max, 16);
+    int kd_int = float_to_uint(kd, params.kd_min, params.kd_max, 16);
+
+    msg[0] = (p_int >> 8) & 0xFF;
+    msg[1] = p_int & 0xFF;
+    msg[2] = (v_int >> 8) & 0xFF;
+    msg[3] = v_int & 0xFF;
+    msg[4] = (kp_int >> 8) & 0xFF;
+    msg[5] = kp_int & 0xFF;
+    msg[6] = (kd_int >> 8) & 0xFF;
+    msg[7] = kd_int & 0xFF;
 }
 
 void pack_exit_motor_mode_cmd(uint8_t *frame)
@@ -285,6 +302,42 @@ void unpack_reply(const std::vector<uint8_t> &buf, bus &bus, const int node_id)
     bus.state.j[node_id].v = v;
     bus.state.j[node_id].t = t;
 }
+
+// Robostride O2 Private protocol Type 2 (manual): 8 bytes = 16b p, 16b v, 16b torque, 16b temp (×10 °C). High byte first.
+// Use when the motor sends feedback in manual format.
+void unpack_reply_o2_manual(const std::vector<uint8_t> &buf, bus &bus, const int node_id)
+{
+    auto &params = bus.params[node_id];
+    if (buf.size() < 8)
+        return;
+
+    int p_int = (buf[0] << 8) | buf[1];
+    int v_int = (buf[2] << 8) | buf[3];
+    int t_int = (buf[4] << 8) | buf[5];
+    int temp_int = (buf[6] << 8) | buf[7];
+
+    float p_wrapped = uint_to_float(p_int, params.p_min, params.p_max, 16);
+    float v = uint_to_float(v_int, params.v_min, params.v_max, 16);
+    float t = uint_to_float(t_int, params.t_min, params.t_max, 16);
+    float temp_c = (float)temp_int / 10.0f;
+
+    bus.state.j[node_id].p_orig = p_wrapped;
+
+    float prev_unwrapped = bus.state.j[node_id].p;
+    float prev_wrapped = wrap_angle(prev_unwrapped);
+    float diff = p_wrapped - prev_wrapped;
+    if (diff > WRAP_RANGE / 2)
+        diff -= WRAP_RANGE;
+    else if (diff < -WRAP_RANGE / 2)
+        diff += WRAP_RANGE;
+    float unwrapped = prev_unwrapped + diff;
+
+    bus.state.j[node_id].p = unwrapped;
+    bus.state.j[node_id].v = v;
+    bus.state.j[node_id].t = t;
+    bus.state.j[node_id].temp = temp_c;
+}
+
 void print_bus_state(const bus &bus, const int num_nodes)
 {
     for (int i = 0; i < num_nodes; i++)

@@ -3,6 +3,18 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+// Teensy firmware expects 48 bytes: 2 buses * 3 nodes * 8. Layout: bytes 0-23 = Can0, 24-47 = Can1.
+// We have 1 node per bus. Command always in slot 0; Teensy sends slot 0 to motor_id = MOTOR_CAN_ID+0.
+// Feedback: if MOTOR_CAN_ID=0 motor feedback is in slot 0 (24-31); if MOTOR_CAN_ID=1 in slot 1 (32-39).
+constexpr int TEENSY_PAYLOAD_BYTES = 48;
+constexpr int CAN1_FEEDBACK_SLOT = 1;  // 0 if Teensy MOTOR_CAN_ID=0, 1 if MOTOR_CAN_ID=1
+
+static void to_teensy_48(const uint8_t* logical_24, uint8_t* out48) {
+    memset(out48, 0, TEENSY_PAYLOAD_BYTES);
+    memcpy(out48 + 0, logical_24 + 0, 8);   // bus 0 node 0 -> Can0 node0
+    memcpy(out48 + 24, logical_24 + 8, 8);  // bus 1 -> Can1 node0 (sent to MOTOR_CAN_ID+0)
+}
+
 SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int port, int nodes, int buses, std::string _board_name)
     : num_nodes(nodes), num_buses(buses), teensy_ip(ip), teensy_port(port),
       first_state_received(false), bus_list(buses),
@@ -178,7 +190,7 @@ void SpineBoard::initBoard()
 
         for (int i = 0; i < num_nodes; i++)
         {
-            pack_cmd(bus_data + i * 8, current_bus, i);
+            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
         }
     }
 
@@ -229,7 +241,7 @@ void SpineBoard::initBoard()
 
         for (int i = 0; i < num_nodes; i++)
         {
-            pack_cmd(bus_data + i * 8, current_bus, i);
+            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
         }
     }
 
@@ -329,7 +341,7 @@ void SpineBoard::zeroMotorCommand()
 
         for (int i = 0; i < num_nodes; i++)
         {
-            pack_cmd(bus_data + i * 8, current_bus, i);
+            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
         }
     }
 
@@ -358,7 +370,7 @@ void SpineBoard::zeroEncoders()
             else
             {
                 // Send zero command for actuators not being recalibrated
-                pack_cmd(bus_data + i * 8, bus_list[j], i);
+                pack_cmd_private_o2(bus_data + i * 8, bus_list[j], i);
             }
         }
     }
@@ -379,7 +391,7 @@ void SpineBoard::start()
     receive_thread = std::thread([&]()
                                  {
             while (true) {
-                std::vector<uint8_t> recv_buffer(num_nodes * 8 * num_buses + num_buses * num_nodes);
+                std::vector<uint8_t> recv_buffer(TEENSY_PAYLOAD_BYTES + 16);
                 asio::ip::udp::endpoint client_endpoint;
                 size_t bytes_received = server_socket.receive_from(asio::buffer(recv_buffer), client_endpoint);
                 std::vector<uint8_t> received_data(recv_buffer.begin(), recv_buffer.begin() + bytes_received);
@@ -390,6 +402,7 @@ void SpineBoard::start()
     send_thread = std::thread([&]()
                               {
             bool first_time = true;
+            int send_count = 0;
             while (true) {
                 if (first_time)
                 {
@@ -407,14 +420,17 @@ void SpineBoard::start()
                 // Generate example data to send
                 std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
 
-                // Pack the data to send
+                // Every ~2 s re-send Enter Motor Mode for bus 1 (Can1) so motor stays enabled
+                bool send_enter_mode = (++send_count % 200 == 0);
+
                 for (int j = 0; j < num_buses; j++) {
-                    
                     bus& current_bus = bus_list[j];
                     uint8_t* bus_data = data_to_send.data() + j * num_nodes * 8;
-
                     for (int i = 0; i < num_nodes; i++) {
-                        pack_cmd(bus_data + i * 8, current_bus, i);
+                        if (send_enter_mode && j == 1 && i == 0)
+                            pack_enter_motor_mode_cmd(bus_data + i * 8);
+                        else
+                            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
                     }
                 }
 
@@ -424,15 +440,21 @@ void SpineBoard::start()
 }
 void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int data_size)
 {
-    // Pad or truncate the data to match the expected size (num_nodes * 8)
-    std::vector<uint8_t> padded_data(data);
-    padded_data.resize(data_size, 0);
+    // Teensy expects 48-byte payload (2 buses * 3 nodes * 8). Convert our 24-byte logical packet to 48-byte layout.
+    std::vector<uint8_t> payload;
+    if (data_size == num_buses * num_nodes * 8 && data_size <= TEENSY_PAYLOAD_BYTES) {
+        payload.resize(TEENSY_PAYLOAD_BYTES);
+        to_teensy_48(data.data(), payload.data());
+    } else {
+        payload.assign(data.begin(), data.end());
+        payload.resize(data_size, 0);
+    }
 
     // Calculate CRC-8 for the payload
-    uint8_t crc_value = calculate_crc8(padded_data.data(), padded_data.size());
+    uint8_t crc_value = calculate_crc8(payload.data(), payload.size());
 
     // Append the CRC value to the payload
-    std::vector<uint8_t> packet(padded_data);
+    std::vector<uint8_t> packet(payload);
     packet.push_back(crc_value);
 
     // Send the data to the Teensy
@@ -456,16 +478,28 @@ void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int
 
 void SpineBoard::process_data(const std::vector<uint8_t> &data_list)
 {
+    std::lock_guard<std::mutex> lock(bus_list_mutex);
+
+    if (data_list.size() >= TEENSY_PAYLOAD_BYTES) {
+        // Teensy sends 48 bytes: Can0 node0 at 0-7, Can1 nodes at 24-31, 32-39, 40-47
+        std::vector<uint8_t> node0(data_list.begin(), data_list.begin() + 8);
+        unpack_reply_o2_manual(node0, bus_list[0], 0);
+        size_t can1_offset = 24 + CAN1_FEEDBACK_SLOT * 8;
+        std::vector<uint8_t> node1(data_list.begin() + can1_offset, data_list.begin() + can1_offset + 8);
+        unpack_reply_o2_manual(node1, bus_list[1], 0);
+        return;
+    }
 
     for (int j(0); j < num_buses; j++)
     {
-        std::vector<uint8_t> bus_data(data_list.begin() + j * num_nodes * 8, data_list.begin() + (j + 1) * num_nodes * 8);
+        size_t bus_offset = j * num_nodes * 8;
+        if (bus_offset + num_nodes * 8 > data_list.size())
+            break;
+        std::vector<uint8_t> bus_data(data_list.begin() + bus_offset, data_list.begin() + bus_offset + num_nodes * 8);
         for (int i = 0; i < num_nodes; i++)
         {
             std::vector<uint8_t> node_data(bus_data.begin() + i * 8, bus_data.begin() + (i + 1) * 8);
-
-            std::lock_guard<std::mutex> lock(bus_list_mutex);
-            unpack_reply(node_data, bus_list[j], i);
+            unpack_reply_o2_manual(node_data, bus_list[j], i);
         }
     }
 }

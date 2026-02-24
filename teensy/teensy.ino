@@ -2,7 +2,8 @@
 #include <QNEthernet.h>
 #define NUM_TX_MAILBOXES 32
 #define NUM_RX_MAILBOXES 32
-// Robostride O2: extended 29-bit CAN ID (id:8, data:16, mode:5)
+// Robostride O2: extended 29-bit CAN ID per manual: Bit28-24=type, Bit7-0=motor CAN ID.
+#define MOTOR_CAN_ID          1   // 0 or 1 to match motor (change and re-upload if no motion)
 #define CANCOM_MOTOR_CTRL     1
 #define CANCOM_MOTOR_FEEDBACK 2
 #define CANCOM_MOTOR_IN       3
@@ -13,8 +14,14 @@ using namespace qindesign::network;
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can0;
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
 
+#define USE_STATIC_IP 1
+#if USE_STATIC_IP
+IPAddress teensyIP(192, 168, 0, 101);
+IPAddress teensySubnet(255, 255, 255, 0);
+IPAddress teensyGateway(192, 168, 0, 1);
+#endif
 constexpr uint32_t kDHCPTimeout = 15000; // 15 seconds
-constexpr uint16_t kPort = 8000;         // udp port
+constexpr uint16_t kPort = 8003;         // udp port (board 0; test_spine listens here, PC = 192.168.0.100)
 constexpr int MAX_NODES = 3;             // Maximum number of nodes
 constexpr int MAX_NUM_SAMPLES = 5000;
 
@@ -46,8 +53,9 @@ static uint8_t getO2ModeFromPayload(const uint8_t *buf) {
   }
   return CANCOM_MOTOR_CTRL;
 }
-static uint32_t makeO2ExtendedId(uint8_t node_id_1based, uint8_t mode) {
-  return ((uint32_t)(node_id_1based & 0xFF) << 21) | ((uint32_t)(mode & 0x1F));
+// Manual: Bit28-24=type, Bit7-0=motor CAN ID (0-based).
+static uint32_t makeO2ExtendedId(uint8_t motor_id, uint8_t mode) {
+  return ((uint32_t)(mode & 0x1F) << 24) | ((uint32_t)(motor_id & 0xFF));
 }
 
 // Calculate CRC-8 checksum
