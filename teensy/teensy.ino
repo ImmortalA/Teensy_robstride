@@ -357,19 +357,38 @@ void printCANCommand()
         printf("\n");
     }
 }
+// RobStride O2: payload byte 7 magic → CAN type. Type in 29-bit ID so motor actually stops/enables.
+#define O2_MAGIC_EXIT  0xFD  // exit motor mode → Type 4 stop
+#define O2_MAGIC_ENTER 0xFC  // enter motor mode → Type 3 enable
+#define O2_MAGIC_ZERO  0xFE  // zero encoder → Type 6
+#define O2_TYPE_CTRL   1     // normal position/velocity control
+
+static uint32_t getO2CanId(uint8_t node_index, const uint8_t *cmd8) {
+    uint8_t motor_id = (node_index == 0) ? MOTOR_ID : (MOTOR_ID + node_index);
+    uint8_t type;
+    if (cmd8[7] == O2_MAGIC_EXIT)
+        type = 4;
+    else if (cmd8[7] == O2_MAGIC_ENTER)
+        type = 3;
+    else if (cmd8[7] == O2_MAGIC_ZERO)
+        type = 6;
+    else
+        type = O2_TYPE_CTRL;
+    return makeO2ExtendedId(motor_id, type);
+}
+
 void sendCANCMD()
 {
-
-    // noInterrupts();
     for (int i = 0; i < MAX_NODES; i++)
     {
         CAN_message_t msg;
         CAN_message_t msg2;
 
-        msg.id = i + 1;
+        msg.flags.extended = 1;
+        msg2.flags.extended = 1;
+        msg.id = getO2CanId(i, can_command[i]);
+        msg2.id = getO2CanId(i, can_command_bus2[i]);
         msg.len = 8;
-
-        msg2.id = i + 1;
         msg2.len = 8;
 
         memcpy(msg.buf, can_command[i], 8);
@@ -378,7 +397,6 @@ void sendCANCMD()
         Can0.write(msg);
         Can1.write(msg2);
     }
-    // interrupts();
 }
 void sendUDPPacket()
 {
