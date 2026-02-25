@@ -8,7 +8,7 @@ struct ActuatorInfo
 int main()
 {
 
-    // Single Teensy, 1 motor on board 0 CAN 1 (Can1 = bus 1)
+    // Single Teensy, 1 motor on board 0 CAN 0 (Can0 = first bus)
     constexpr static int NUM_ACTUATOR_TEENSY = 1;
     constexpr static int ACTUATOR_MAX_NUM_CAN_BUSES = 3;
     constexpr static int ACTUATOR_MAX_NUM_NODES_PER_BUS = 1;
@@ -21,9 +21,9 @@ int main()
     constexpr static int IMU_PORT = 8000;
     constexpr static int RC_PORT = 8001;
 
-    // One motor: board 0, bus 1 (Can1), node 0
+    // One motor: board 0, bus 0 (Can0), node 0
     static std::vector<ActuatorInfo> ACTUATOR_INFO_MAP = {
-        {0, 1, 0},  // 0: single motor on board 0 CAN 1
+        {0, 0, 0},  // 0: single motor on board 0 CAN 0 (first port)
     };
 
     static std::vector<std::vector<std::vector<ActuatorParams>>> ACTUATOR_PARAMS = {
@@ -92,7 +92,7 @@ int main()
         {
             auto info = ACTUATOR_INFO_MAP[i];
             auto &bus_list = boards_bus_lists[info.board];
-            std::cout << "Motor (board 0 CAN 1): p=" << bus_list[info.bus].state.j[info.node].p << std::endl;
+            std::cout << "Motor (board 0 CAN 0): p=" << bus_list[info.bus].state.j[info.node].p << std::endl;
 
             // Position control: try constant 0.5 rad first to see if motor moves; then use sine
             float p_target = 0.5f;  // constant: move to 0.5 rad (try this first); or: 0.2f * sin(0.3f * iter * dt * 2 * M_PI)

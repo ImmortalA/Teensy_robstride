@@ -2,13 +2,6 @@
 #include <QNEthernet.h>
 #define NUM_TX_MAILBOXES 32
 #define NUM_RX_MAILBOXES 32
-// Robostride O2: extended 29-bit CAN ID per manual: Bit28-24=type, Bit7-0=motor CAN ID.
-#define MOTOR_CAN_ID          1   // 0 or 1 to match motor (change and re-upload if no motion)
-#define CANCOM_MOTOR_CTRL     1
-#define CANCOM_MOTOR_FEEDBACK 2
-#define CANCOM_MOTOR_IN       3
-#define CANCOM_MOTOR_RESET    4
-#define CANCOM_MOTOR_ZERO     6
 using namespace qindesign::network;
 
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> Can0;
@@ -44,18 +37,49 @@ unsigned int packet_count_bus2[MAX_NODES] = {0};
 bool first_packet_recv = false;
 const uint8_t RESET_COMMAND = 0xFF;
 
-static uint8_t getO2ModeFromPayload(const uint8_t *buf) {
-  if (buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF &&
-      buf[4] == 0xFF && buf[5] == 0xFF && buf[6] == 0xFF) {
-    if (buf[7] == 0xFD) return CANCOM_MOTOR_RESET;
-    if (buf[7] == 0xFC) return CANCOM_MOTOR_IN;
-    if (buf[7] == 0xFE) return CANCOM_MOTOR_ZERO;
-  }
-  return CANCOM_MOTOR_CTRL;
+// Simple motor enable-only helper (RobStride O2, 29-bit extended CAN) – stop -> zero -> enable once at startup.
+// Change MOTOR_ID to match your motor if needed (e.g. 0 or 1).
+#define MOTOR_ID  1
+#define CANCOM_MOTOR_ENABLE   3
+#define CANCOM_MOTOR_RESET    4
+#define CANCOM_MOTOR_ZERO     6
+
+static inline uint32_t makeO2ExtendedId(uint8_t motor_id, uint8_t type) {
+    return ((uint32_t)(type & 0x1F) << 24) | ((uint32_t)(motor_id & 0xFF));
 }
-// Manual: Bit28-24=type, Bit7-0=motor CAN ID (0-based).
-static uint32_t makeO2ExtendedId(uint8_t motor_id, uint8_t mode) {
-  return ((uint32_t)(mode & 0x1F) << 24) | ((uint32_t)(motor_id & 0xFF));
+
+static void sendSimpleEnableSequence() {
+    CAN_message_t msg;
+    uint8_t payload[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    msg.flags.extended = 1;
+    msg.len = 8;
+    memcpy(msg.buf, payload, 8);
+
+    Serial.println("Simple O2 enable sequence on both CAN buses.");
+
+    // Stop (Type 4)
+    msg.id = makeO2ExtendedId(MOTOR_ID, CANCOM_MOTOR_RESET);
+    Serial.println("Stop (Type 4)...");
+    Can0.write(msg);
+    Can1.write(msg);
+    delay(200);
+
+    // Zero (Type 6)
+    msg.id = makeO2ExtendedId(MOTOR_ID, CANCOM_MOTOR_ZERO);
+    Serial.println("Zero (Type 6)...");
+    Can0.write(msg);
+    Can1.write(msg);
+    delay(200);
+
+    // Enable (Type 3)
+    msg.id = makeO2ExtendedId(MOTOR_ID, CANCOM_MOTOR_ENABLE);
+    Serial.println("Enable (Type 3)...");
+    Can0.write(msg);
+    Can1.write(msg);
+    delay(200);
+
+    Serial.println("Enable sequence sent.");
 }
 
 // Calculate CRC-8 checksum
@@ -89,6 +113,10 @@ void setup()
 
     setupEthernet();
     setupCAN();
+
+    // One-shot stop -> zero -> enable sequence on both CAN buses (same pattern as enable_motor_only.ino).
+    sendSimpleEnableSequence();
+    Serial.println("======== Setup ends ========");
 }
 
 void setupEthernet()
@@ -101,6 +129,17 @@ void setupEthernet()
     Ethernet.onLinkState([](bool state)
                          { printf("[Ethernet] Link %s\r\n", state ? "ON" : "OFF"); });
 
+#if USE_STATIC_IP
+    // Static IP: no DHCP, use teensyIP / teensySubnet / teensyGateway (QNEthernet: ip, netmask, gateway)
+    printf("Starting Ethernet with static IP...\r\n");
+    if (!Ethernet.begin(teensyIP, teensySubnet, teensyGateway))
+    {
+        printf("Failed to start Ethernet (static)\r\n");
+        return;
+    }
+    printf("Static IP ");
+    printIPAddress();
+#else
     printf("Starting Ethernet with DHCP...\r\n");
     if (!Ethernet.begin())
     {
@@ -112,10 +151,9 @@ void setupEthernet()
         printf("Failed to get IP address from DHCP\r\n");
         return;
     }
-
     printf("Ethernet speed: %d\r\n", Ethernet.linkSpeed());
-
     printIPAddress();
+#endif
 
     udp.begin(kPort);
     printf("Done setting Ethernet\r\n");
@@ -168,13 +206,7 @@ void printIPAddress()
 
 void canReceive(const CAN_message_t &msg)
 {
-    if (msg.len != 8) return;
-    if (!msg.flags.extended) return;
-    uint32_t mode = msg.id & 0x1F;
-    if (mode != CANCOM_MOTOR_FEEDBACK) return;
-    int node_id = (msg.id >> 21) & 0xFF;
-    node_id = node_id - 1;
-    if (node_id < 0 || node_id >= MAX_NODES) return;
+    int node_id = msg.buf[0] - 1;
     memcpy(can_data[node_id], msg.buf, 8);
     if (node_id >= 0 && node_id < MAX_NODES)
     {
@@ -197,13 +229,7 @@ void canReceive(const CAN_message_t &msg)
 
 void canReceive2(const CAN_message_t &msg)
 {
-    if (msg.len != 8) return;
-    if (!msg.flags.extended) return;
-    uint32_t mode = msg.id & 0x1F;
-    if (mode != CANCOM_MOTOR_FEEDBACK) return;
-    int node_id = (msg.id >> 21) & 0xFF;
-    node_id = node_id - 1;
-    if (node_id < 0 || node_id >= MAX_NODES) return;
+    int node_id = msg.buf[0] - 1;
     memcpy(can_data_bus2[node_id], msg.buf, 8);
     if (node_id >= 0 && node_id < MAX_NODES)
     {
@@ -244,6 +270,12 @@ void receiveUDPPacket()
     if (size > 0)
     {
         const uint8_t *data = udp.data();
+        // Print received UDP payload (length + hex bytes)
+        Serial.printf("UDP RX len=%d data=", size);
+        for (int i = 0; i < size && i < 64; i++)
+            Serial.printf("%02X ", data[i]);
+        Serial.println();
+
         if (size == 2 && data[0] == RESET_COMMAND)
         {
             reset();
@@ -333,16 +365,11 @@ void sendCANCMD()
     {
         CAN_message_t msg;
         CAN_message_t msg2;
-        uint8_t node_id_1based = i + 1;
-        uint8_t mode0 = getO2ModeFromPayload(can_command[i]);
-        uint8_t mode1 = getO2ModeFromPayload(can_command_bus2[i]);
 
-        msg.flags.extended = 1;
-        msg.id = makeO2ExtendedId(node_id_1based, mode0);
+        msg.id = i + 1;
         msg.len = 8;
 
-        msg2.flags.extended = 1;
-        msg2.id = makeO2ExtendedId(node_id_1based, mode1);
+        msg2.id = i + 1;
         msg2.len = 8;
 
         memcpy(msg.buf, can_command[i], 8);

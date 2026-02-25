@@ -33,7 +33,18 @@ Check: `ifconfig enp8s0` → `inet 192.168.0.100`.
 
 **First Teensy (board 0) = 192.168.0.101, port 8003**
 
-- **USE_STATIC_IP** = 1 → Teensy uses 192.168.0.101 (teensyIP, teensySubnet, teensyGateway). Set to 0 for DHCP.
+### Static IP on Teensy
+
+1. In **teensy/teensy.ino** set:
+   - `#define USE_STATIC_IP 1`
+   - `IPAddress teensyIP(192, 168, 0, 101);`  — board 0; use 102 for board 1
+   - `IPAddress teensySubnet(255, 255, 255, 0);`
+   - `IPAddress teensyGateway(192, 168, 0, 1);`  — optional if no router on the link
+2. Build and upload the sketch. The Teensy will come up with that IP (no DHCP).
+3. For DHCP instead, set `USE_STATIC_IP` to `0`.
+
+Other settings:
+
 - **kPort** = 8003 (board 0). Use 8004 for a second Teensy (board 1).
 - **udp.send("192.168.0.100", kPort, ...)** → PC IP; host receives on 8003/8004.
 

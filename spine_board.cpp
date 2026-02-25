@@ -121,6 +121,16 @@ void SpineBoard::initBoard()
         std::cerr << "Actuator parameters not set. Exiting..." << std::endl;
         exit(-1);
     }
+    // Small helper to pause between steps when running interactively.
+    auto prompt_continue = [](const char *step_label) {
+        std::cout << step_label << " Continue to next step? [y/N]: " << std::flush;
+        char c;
+        if (!(std::cin >> c)) {
+            return false;
+        }
+        return (c == 'y' || c == 'Y');
+    };
+
     // Spine board reset command
     std::vector<uint8_t> reset_data(1, 0xFF);
     send_data_to_teensy(reset_data, 1);
@@ -128,6 +138,10 @@ void SpineBoard::initBoard()
 
     printf("Reset sent \n");
     printf("num_buses: %d\n", num_buses);
+    if (!prompt_continue("Reset step done.")) {
+        std::cout << "Init sequence halted after reset.\n";
+        return;
+    }
 
     std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
     // Send exit motor mode command
@@ -148,6 +162,10 @@ void SpineBoard::initBoard()
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
 
     printf("Exit motor mode sent \n");
+    if (!prompt_continue("Exit motor mode step done.")) {
+        std::cout << "Init sequence halted after exit motor mode.\n";
+        return;
+    }
     // exit(0);
 
 // #ifdef ZERO_ENCODERS
@@ -197,6 +215,10 @@ void SpineBoard::initBoard()
     send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
     printf("Zero Command sent \n");
+    if (!prompt_continue("Zero command (before enter motor mode) step done.")) {
+        std::cout << "Init sequence halted after zero command.\n";
+        return;
+    }
 
     // Send enter motor mode command
     for (int j = 0; j < num_buses; j++)
@@ -220,6 +242,10 @@ void SpineBoard::initBoard()
     std::this_thread::sleep_for(std::chrono::microseconds(2000000));
 
     printf("Enter motor mode sent \n");
+    if (!prompt_continue("Enter motor mode step done.")) {
+        std::cout << "Init sequence halted after enter motor mode.\n";
+        return;
+    }
 
     for (int j(0); j < num_buses; j++)
     {
@@ -248,6 +274,10 @@ void SpineBoard::initBoard()
     send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
     printf("Zero Command sent After motor mode \n");
+    if (!prompt_continue("Final zero command step done.")) {
+        std::cout << "Init sequence halted after final zero command.\n";
+        return;
+    }
 }
 
 // void SpineBoard::initBoard()
@@ -420,14 +450,14 @@ void SpineBoard::start()
                 // Generate example data to send
                 std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
 
-                // Every ~2 s re-send Enter Motor Mode for bus 1 (Can1) so motor stays enabled
+                // Every ~2 s re-send Enter Motor Mode for bus 0 (Can0) so motor stays enabled
                 bool send_enter_mode = (++send_count % 200 == 0);
 
                 for (int j = 0; j < num_buses; j++) {
                     bus& current_bus = bus_list[j];
                     uint8_t* bus_data = data_to_send.data() + j * num_nodes * 8;
                     for (int i = 0; i < num_nodes; i++) {
-                        if (send_enter_mode && j == 1 && i == 0)
+                        if (send_enter_mode && j == 0 && i == 0)
                             pack_enter_motor_mode_cmd(bus_data + i * 8);
                         else
                             pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
