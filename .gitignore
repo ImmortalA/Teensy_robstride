@@ -32,3 +32,6 @@
 *.app
 
 build/
+
+# Large vendor / reference material (kept locally, not in git)
+extra_materials/
