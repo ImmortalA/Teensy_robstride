@@ -94,12 +94,12 @@ int main()
             auto &bus_list = boards_bus_lists[info.board];
             std::cout << "Motor (board 0 CAN 0): p=" << bus_list[info.bus].state.j[info.node].p << std::endl;
 
-            // Position control: try constant 0.5 rad first to see if motor moves; then use sine
-            float p_target = 0.5f;  // constant: move to 0.5 rad (try this first); or: 0.2f * sin(0.3f * iter * dt * 2 * M_PI)
+            // Softer gains to avoid harsh motion (tune as needed: kp [0,500], kd [0,5])
+            float p_target = 0.2f;   // small step from zero; increase slowly for stiffer tracking
             bus_list[info.bus].command.j[info.node].p_des = p_target;
             bus_list[info.bus].command.j[info.node].v_des = 0.0f;
-            bus_list[info.bus].command.j[info.node].kp = 80.0f;
-            bus_list[info.bus].command.j[info.node].kd = 2.0f;
+            bus_list[info.bus].command.j[info.node].kp = 20.0f;   // was 80 – lower = gentler
+            bus_list[info.bus].command.j[info.node].kd = 2.5f;    // damping to reduce overshoot
             bus_list[info.bus].command.j[info.node].t_ff = 0.0f;
         }
 
