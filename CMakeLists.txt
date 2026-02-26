@@ -21,12 +21,17 @@ add_executable(test_spine apps/main.cpp)
 target_link_libraries(test_spine spine_board robstride_o2)
 target_include_directories(test_spine PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
 
-# MIT-focused demo executable (apps/demo_MIT.cpp)
-add_executable(test_spine_mit apps/demo_MIT.cpp)
+# MIT-only demo (apps/demo02_MIT.cpp)
+add_executable(test_spine_mit apps/demo02_MIT.cpp)
 target_link_libraries(test_spine_mit spine_board robstride_o2)
 target_include_directories(test_spine_mit PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
 
-# Communication test executable
-add_executable(comm_test apps/demo_comm_test.cpp)
+# Communication test (apps/demo01_comm_test.cpp)
+add_executable(comm_test apps/demo01_comm_test.cpp)
 target_link_libraries(comm_test spine_board)
 target_include_directories(comm_test PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Two motors on Can0 daisy chain (apps/demo03_daisy_chain_2_motors.cpp)
+add_executable(daisy_chain_2_motors apps/demo03_daisy_chain_2_motors.cpp)
+target_link_libraries(daisy_chain_2_motors spine_board robstride_o2)
+target_include_directories(daisy_chain_2_motors PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)

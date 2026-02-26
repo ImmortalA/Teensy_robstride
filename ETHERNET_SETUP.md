@@ -22,10 +22,10 @@ Check: `ifconfig enp8s0` → `inet 192.168.0.100`.
 
 ---
 
-## 2. main.cpp (host app)
+## 2. Host apps (apps/*.cpp)
 
 - **BOARD_INTERFACE_NAME** = `"enp8s0"` (Ethernet).
-- **ACTUATOR_TEENSY_BOARD_IPS** = `{"192.168.0.101", "192.168.0.102"}` — first Teensy = 192.168.0.101, second = 192.168.0.102. Must match the Teensy firmware.
+- **ACTUATOR_TEENSY_BOARD_IPS** = `{"192.168.0.101", "192.168.0.102"}` — first Teensy = 192.168.0.101, second = 192.168.0.102. Set in `apps/main.cpp`, `apps/demo02_MIT.cpp`, `apps/demo03_daisy_chain_2_motors.cpp` as needed. Must match the Teensy firmware.
 
 ---
 
@@ -53,7 +53,7 @@ Other settings:
 ## 4. Checklist
 
 - [ ] PC: enp8s0 = 192.168.0.100
-- [ ] main.cpp: BOARD_INTERFACE_NAME = "enp8s0", ACTUATOR_TEENSY_BOARD_IPS[0] = "192.168.0.101"
+- [ ] apps (e.g. main.cpp): BOARD_INTERFACE_NAME = "enp8s0", ACTUATOR_TEENSY_BOARD_IPS[0] = "192.168.0.101"
 - [ ] teensy.ino: USE_STATIC_IP 1, teensyIP = 192.168.0.101, kPort 8003, udp.send("192.168.0.100", kPort, ...)
 - [ ] Rebuild host (`make`), re-upload Teensy, run `./test_spine`
 
@@ -63,7 +63,7 @@ Other settings:
 
 If you see `Motor (board 0 CAN 1): p=-12.5` (or other values) but the motor does not move:
 
-1. **Motor CAN ID** – In **teensy/teensy.ino** set `MOTOR_CAN_ID` to match the motor. Default is `0`. If the motor was set to ID **1** in the official Robostride motor tool, change to `#define MOTOR_CAN_ID 1` and re-upload the Teensy.
-2. **Confirm ID in motor tool** – Connect the motor with the official Windows motor_tool (USB-CAN). Note the “CAN_ID” or “id” shown when the motor is detected; use that value for `MOTOR_CAN_ID`.
-3. **Debug TX** – In teensy.ino set `#define DEBUG_CAN_TX 1`, re-upload, open Serial Monitor (115200). You should see `[Can1 TX] id=0x01000000` (for ID 0) or `0x01000001` (for ID 1) and 8 payload bytes every 100 packets. Confirm the ID matches the motor.
-4. **Test position** – main.cpp sends a constant `p_des = 0.5` rad. If the motor is at -12.5 rad (raw 0), it should try to move toward 0.5 rad. Try a larger value (e.g. 1.0f) to see if it responds.
+1. **Motor CAN ID** – In **teensy/teensy.ino** set `MOTOR_ID` to match the motor. Default in the sketch is `1`. If the motor uses another ID in the official Robstride motor tool, set `#define MOTOR_ID <id>` and re-upload the Teensy.
+2. **Confirm ID in motor tool** – Connect the motor with the official Windows motor_tool (USB-CAN). Note the “CAN_ID” or “id” shown when the motor is detected; use that value for `MOTOR_ID`.
+3. **Debug** – Re-upload teensy.ino, open Serial Monitor (115200). Confirm the CAN ID in transmitted frames matches the motor.
+4. **Test position** – The host app (e.g. test_spine) sends position/velocity commands. If the motor is at -12.5 rad (raw 0), it should try to move toward the commanded position. Try a larger amplitude or step in the app to see if it responds.

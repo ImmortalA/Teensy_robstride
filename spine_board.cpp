@@ -496,6 +496,9 @@ void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int
     if (data_size == TEENSY_PAYLOAD_BYTES && data[0] == 0x12) {
         // Parameter write (Type 18): 48 bytes [0x12, 8-byte Type18 payload, zeros]; no layout conversion.
         payload.assign(data.begin(), data.begin() + TEENSY_PAYLOAD_BYTES);
+    } else if (data_size == TEENSY_PAYLOAD_BYTES) {
+        // Full 48-byte packet (e.g. 2 buses × 3 nodes): send as-is to match Teensy layout
+        payload.assign(data.begin(), data.begin() + TEENSY_PAYLOAD_BYTES);
     } else if (data_size == num_buses * num_nodes * 8 && data_size <= TEENSY_PAYLOAD_BYTES) {
         payload.resize(TEENSY_PAYLOAD_BYTES);
         to_teensy_48(data.data(), payload.data());
@@ -538,12 +541,17 @@ void SpineBoard::process_data(const std::vector<uint8_t> &data_list)
     std::lock_guard<std::mutex> lock(bus_list_mutex);
 
     if (data_list.size() >= TEENSY_PAYLOAD_BYTES) {
-        // Teensy sends 48 bytes: Can0 node0 at 0-7, Can1 nodes at 24-31, 32-39, 40-47
-        std::vector<uint8_t> node0(data_list.begin(), data_list.begin() + 8);
-        unpack_reply_o2_manual(node0, bus_list[0], 0);
-        size_t can1_offset = 24 + CAN1_FEEDBACK_SLOT * 8;
-        std::vector<uint8_t> node1(data_list.begin() + can1_offset, data_list.begin() + can1_offset + 8);
-        unpack_reply_o2_manual(node1, bus_list[1], 0);
+        // Teensy sends 48 bytes: bus0 nodes 0,1,2 at 0-23; bus1 nodes 0,1,2 at 24-47
+        for (int j = 0; j < num_buses; j++) {
+            size_t bus_offset = j * num_nodes * 8;
+            if (bus_offset + num_nodes * 8 > data_list.size())
+                break;
+            for (int i = 0; i < num_nodes; i++) {
+                std::vector<uint8_t> node_data(data_list.begin() + bus_offset + i * 8,
+                                               data_list.begin() + bus_offset + (i + 1) * 8);
+                unpack_reply_o2_manual(node_data, bus_list[j], i);
+            }
+        }
         return;
     }
 
