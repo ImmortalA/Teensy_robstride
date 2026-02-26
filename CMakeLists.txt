@@ -21,12 +21,12 @@ add_executable(test_spine apps/main.cpp)
 target_link_libraries(test_spine spine_board robstride_o2)
 target_include_directories(test_spine PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
 
-# MIT-focused demo executable (apps/main_MIT.cpp)
-add_executable(test_spine_mit apps/main_MIT.cpp)
+# MIT-focused demo executable (apps/demo_MIT.cpp)
+add_executable(test_spine_mit apps/demo_MIT.cpp)
 target_link_libraries(test_spine_mit spine_board robstride_o2)
 target_include_directories(test_spine_mit PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
 
-# Communication test executable (original main kept for Teensy/PC comm checks)
-add_executable(comm_test apps/main_comm_test.cpp)
+# Communication test executable
+add_executable(comm_test apps/demo_comm_test.cpp)
 target_link_libraries(comm_test spine_board)
 target_include_directories(comm_test PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
