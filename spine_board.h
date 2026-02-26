@@ -1,5 +1,6 @@
 #ifndef SPINE_BOARD_H
 #define SPINE_BOARD_H
+#include <atomic>
 #include <mutex>
 #include <iostream>
 #include <cstring>
@@ -32,6 +33,7 @@ private:
     std::thread receive_thread;
     std::thread send_thread;
     std::string board_name;
+    std::atomic<bool> allow_command_send_{false};  // when false, send thread does not send Type 1 after init
 
 public:
     SpineBoard(const std::string &ip, const std::string &interface, int port, int nodes, int buses, std::string board_name = "board_1");
@@ -81,6 +83,7 @@ public:
         std::lock_guard<std::mutex> lock(bus_list_mutex);
         bus_list = new_bus_list;
     }
+    void setAllowCommandSend(bool allow) { allow_command_send_ = allow; }
     ~SpineBoard()
     {
         for (int j = 0; j < num_buses; j++)

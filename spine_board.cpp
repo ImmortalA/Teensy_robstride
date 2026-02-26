@@ -3,6 +3,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+// -----------------------------------------------------------------------------
+// Teensy packet layout and helpers
+// -----------------------------------------------------------------------------
 // Teensy firmware expects 48 bytes: 2 buses * 3 nodes * 8. Layout: bytes 0-23 = Can0, 24-47 = Can1.
 // We have 1 node per bus. Command always in slot 0; Teensy sends slot 0 to motor_id = MOTOR_CAN_ID+0.
 // Feedback: if MOTOR_CAN_ID=0 motor feedback is in slot 0 (24-31); if MOTOR_CAN_ID=1 in slot 1 (32-39).
@@ -15,12 +18,15 @@ static void to_teensy_48(const uint8_t* logical_24, uint8_t* out48) {
     memcpy(out48 + 24, logical_24 + 8, 8);  // bus 1 -> Can1 node0 (sent to MOTOR_CAN_ID+0)
 }
 
+// -----------------------------------------------------------------------------
+// Constructor: resolve interface, bind sockets, init bus_list
+// -----------------------------------------------------------------------------
 SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int port, int nodes, int buses, std::string _board_name)
     : num_nodes(nodes), num_buses(buses), teensy_ip(ip), teensy_port(port),
       first_state_received(false), bus_list(buses),
       sock_send(io_context), server_socket(io_context), board_name(_board_name)
 {
-    // Find the requested interface IP, or first non-loopback IPv4 interface as fallback
+    // -------- Resolve bind address: requested interface or first non-loopback --------
     asio::ip::address_v4 bind_address;
     struct ifaddrs *ifaddr, *ifa;
     int family, s;
@@ -88,16 +94,16 @@ SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int 
         throw std::runtime_error("Failed to find network interface IP address");
     }
 
-    // Bind the sending socket to the chosen interface
+    // -------- Bind UDP sockets --------
     sock_send.open(asio::ip::udp::v4());
     sock_send.bind(asio::ip::udp::endpoint(bind_address, 0));
 
-    // Bind the server socket to the chosen interface
     server_socket.open(asio::ip::udp::v4());
     server_socket.bind(asio::ip::udp::endpoint(bind_address, teensy_port));
 
     std::cout << "Server bound to " << server_socket.local_endpoint() << std::endl;
 
+    // -------- Allocate bus_list (state, command, params) --------
     for (int j = 0; j < num_buses; j++)
     {
         bus_list[j].state.j = new joint_state[num_nodes];
@@ -112,40 +118,28 @@ SpineBoard::SpineBoard(const std::string &ip, const std::string &interface, int 
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// initBoard: interactive sequence (reset -> exit -> zero -> enter -> Type1 zero -> final zero)
+// -----------------------------------------------------------------------------
 void SpineBoard::initBoard()
 {
-
-    // make sure actuator type is set
     if (!actuator_params_set)
     {
         std::cerr << "Actuator parameters not set. Exiting..." << std::endl;
         exit(-1);
     }
-    // Small helper to pause between steps when running interactively.
-    auto prompt_continue = [](const char *step_label) {
-        std::cout << step_label << " Continue to next step? [y/N]: " << std::flush;
-        char c;
-        if (!(std::cin >> c)) {
-            return false;
-        }
-        return (c == 'y' || c == 'Y');
-    };
+    std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
 
-    // Spine board reset command
+    // -------- Step 1: Reset --------
     std::vector<uint8_t> reset_data(1, 0xFF);
     send_data_to_teensy(reset_data, 1);
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
 
     printf("Reset sent \n");
     printf("num_buses: %d\n", num_buses);
-    if (!prompt_continue("Reset step done.")) {
-        std::cout << "Init sequence halted after reset.\n";
-        return;
-    }
 
-    std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
-    // Send exit motor mode command
-
+    // -------- Step 2: Exit motor mode --------
     for (int j = 0; j < num_buses; j++)
     {
         // bus &current_bus = bus_list[j];
@@ -162,10 +156,6 @@ void SpineBoard::initBoard()
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
 
     printf("Exit motor mode sent \n");
-    if (!prompt_continue("Exit motor mode step done.")) {
-        std::cout << "Init sequence halted after exit motor mode.\n";
-        return;
-    }
     // exit(0);
 
 // #ifdef ZERO_ENCODERS
@@ -188,6 +178,7 @@ void SpineBoard::initBoard()
 
 // #endif
 
+    // -------- Step 3: Zero command (before enter motor mode) --------
     for (int j(0); j < num_buses; j++)
     {
         for (int i = 0; i < num_nodes; i++)
@@ -200,27 +191,9 @@ void SpineBoard::initBoard()
         }
     }
 
-    // Pack the data to send
-    for (int j = 0; j < num_buses; j++)
-    {
-        bus &current_bus = bus_list[j];
-        uint8_t *bus_data = data_to_send.data() + j * num_nodes * 8;
+    // NOTE: Previously we sent a Type 1 \"zero\" command from the host here. This is now\n+    // disabled so motor init does not send any Type 1 frames from the PC.\n+    // for (int j = 0; j < num_buses; j++)\n+    // {\n+    //     bus &current_bus = bus_list[j];\n+    //     uint8_t *bus_data = data_to_send.data() + j * num_nodes * 8;\n+    //     for (int i = 0; i < num_nodes; i++)\n+    //     {\n+    //         pack_cmd_private_o2(bus_data + i * 8, current_bus, i);\n+    //     }\n+    // }\n+    // send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);\n+    // std::this_thread::sleep_for(std::chrono::microseconds(1000000));\n+    // printf(\"Zero Command sent \\n\");
 
-        for (int i = 0; i < num_nodes; i++)
-        {
-            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
-        }
-    }
-
-    send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
-    std::this_thread::sleep_for(std::chrono::microseconds(1000000));
-    printf("Zero Command sent \n");
-    if (!prompt_continue("Zero command (before enter motor mode) step done.")) {
-        std::cout << "Init sequence halted after zero command.\n";
-        return;
-    }
-
-    // Send enter motor mode command
+    // -------- Step 4: Enter motor mode + immediate Type 1 (zero) so motor has setpoint --------
     for (int j = 0; j < num_buses; j++)
     {
         // bus &current_bus = bus_list[j];
@@ -232,54 +205,66 @@ void SpineBoard::initBoard()
         }
     }
 
-    for (int i = 0; i < 1; i++)
-    {
+    // Send enter motor mode
+    send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-        send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-    }
+    // NOTE: Sending a burst of Type 1 \"zero\" commands from the host used to happen here.
+    // This is now disabled so that motor init does not send any Type 1 frames from the PC.
+    // for (int j(0); j < num_buses; j++)
+    // {
+    //     for (int i = 0; i < num_nodes; i++)
+    //     {
+    //         bus_list[j].command.j[i].v_des = 0.0f;
+    //         bus_list[j].command.j[i].p_des = 0.0f;
+    //         bus_list[j].command.j[i].kp = 0.0f;
+    //         bus_list[j].command.j[i].kd = 0.0f;
+    //         bus_list[j].command.j[i].t_ff = 0.0f;
+    //     }
+    // }
+    // for (int j = 0; j < num_buses; j++)
+    // {
+    //     bus &current_bus = bus_list[j];
+    //     uint8_t *bus_data = data_to_send.data() + j * num_nodes * 8;
+    //     for (int i = 0; i < num_nodes; i++)
+    //         pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
+    // }
+    // for (int k = 0; k < 20; k++)
+    // {
+    //     send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
+    //     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // }
 
-    std::this_thread::sleep_for(std::chrono::microseconds(2000000));
+    std::this_thread::sleep_for(std::chrono::microseconds(500000));
 
     printf("Enter motor mode sent \n");
-    if (!prompt_continue("Enter motor mode step done.")) {
-        std::cout << "Init sequence halted after enter motor mode.\n";
-        return;
-    }
 
-    for (int j(0); j < num_buses; j++)
-    {
-        for (int i = 0; i < num_nodes; i++)
-        {
-            bus_list[j].command.j[i].v_des = 0.0f;
-            bus_list[j].command.j[i].p_des = 0.0f;
-            bus_list[j].command.j[i].kp = 0.0f;
-            bus_list[j].command.j[i].kd = 0.0f;
-            bus_list[j].command.j[i].t_ff = 0.0f;
-        }
-    }
-
-    // Pack the data to send
-    for (int j = 0; j < num_buses; j++)
-    {
-        bus &current_bus = bus_list[j];
-        uint8_t *bus_data = data_to_send.data() + j * num_nodes * 8;
-
-        for (int i = 0; i < num_nodes; i++)
-        {
-            pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
-        }
-    }
-
-    send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
-    std::this_thread::sleep_for(std::chrono::microseconds(1000000));
-    printf("Zero Command sent After motor mode \n");
-    if (!prompt_continue("Final zero command step done.")) {
-        std::cout << "Init sequence halted after final zero command.\n";
-        return;
-    }
+    // -------- Step 5: Final zero (keep state only; no Type 1 send) --------
+    // Keep bus_list zeroed so the send thread can later use it, but do not send Type 1 packets.
+    // for (int j(0); j < num_buses; j++)
+    // {
+    //     for (int i = 0; i < num_nodes; i++)
+    //     {
+    //         bus_list[j].command.j[i].v_des = 0.0f;
+    //         bus_list[j].command.j[i].p_des = 0.0f;
+    //         bus_list[j].command.j[i].kp = 0.0f;
+    //         bus_list[j].command.j[i].kd = 0.0f;
+    //         bus_list[j].command.j[i].t_ff = 0.0f;
+    //     }
+    // }
+    // for (int j = 0; j < num_buses; j++)
+    // {
+    //     bus &current_bus = bus_list[j];
+    //     uint8_t *bus_data = data_to_send.data() + j * num_nodes * 8;
+    //     for (int i = 0; i < num_nodes; i++)
+    //         pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
+    // }
+    // send_data_to_teensy(data_to_send, num_buses * num_nodes * 8);
+    // std::this_thread::sleep_for(std::chrono::microseconds(1000000));
+    // printf("Zero Command sent After motor mode \n");
 }
 
+// -------- Alternative init (commented out) --------
 // void SpineBoard::initBoard()
 // {
 //     restBoard();
@@ -290,8 +275,12 @@ void SpineBoard::initBoard()
 //     zeroMotorCommand();
 //     printf("Board initialized\n");
 // }
+
+// -----------------------------------------------------------------------------
+// Standalone init helpers (restBoard, exitMotorMode, enterMotorMode, zeroMotorCommand, zeroEncoders)
+// -----------------------------------------------------------------------------
 void SpineBoard::restBoard()
-{   
+{
     printf("Sending rest command...\n");
     if (!actuator_params_set)
     {
@@ -304,9 +293,9 @@ void SpineBoard::restBoard()
     std::this_thread::sleep_for(std::chrono::microseconds(1000000));
     printf("Reset sent \n");
 }
+
 void SpineBoard::exitMotorMode()
 {
-
     printf("Sending exit motor mode command\n");
     std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
     for (int j = 0; j < num_buses; j++)
@@ -328,7 +317,6 @@ void SpineBoard::exitMotorMode()
 
 void SpineBoard::enterMotorMode()
 {
-
     printf("Sending enter motor mode command ...\n");
     std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
     // Send enter motor mode command
@@ -413,11 +401,14 @@ void SpineBoard::zeroEncoders()
     }
 }
 
+// -----------------------------------------------------------------------------
+// start: launch receive and send threads
+// -----------------------------------------------------------------------------
 void SpineBoard::start()
 {
     std::cout << "UDP server listening on " << server_socket.local_endpoint() << std::endl;
 
-    // Start the server in a separate thread
+    // -------- Receive thread: handle incoming UDP from Teensy --------
     receive_thread = std::thread([&]()
                                  {
             while (true) {
@@ -429,6 +420,7 @@ void SpineBoard::start()
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             } });
 
+    // -------- Send thread: init once, then loop (pack + send to Teensy every 200 µs) --------
     send_thread = std::thread([&]()
                               {
             bool first_time = true;
@@ -442,6 +434,13 @@ void SpineBoard::start()
                     boardInitialized = true;
 
                     first_time = false;
+                    continue;
+                }
+
+                // When false, do not send any packets so Teensy keeps last (e.g. Type 3). Avoids
+                // sending Type 1 right after final zero, which was causing the motor to spin.
+                if (!allow_command_send_) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
                     continue;
                 }
 
@@ -468,6 +467,10 @@ void SpineBoard::start()
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
             } });
 }
+
+// -----------------------------------------------------------------------------
+// UDP send: build 48-byte payload + CRC, send to Teensy
+// -----------------------------------------------------------------------------
 void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int data_size)
 {
     // Teensy expects 48-byte payload (2 buses * 3 nodes * 8). Convert our 24-byte logical packet to 48-byte layout.
@@ -506,6 +509,9 @@ void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int
     // }
 }
 
+// -----------------------------------------------------------------------------
+// process_data: unpack Teensy feedback into bus_list state
+// -----------------------------------------------------------------------------
 void SpineBoard::process_data(const std::vector<uint8_t> &data_list)
 {
     std::lock_guard<std::mutex> lock(bus_list_mutex);
@@ -533,9 +539,14 @@ void SpineBoard::process_data(const std::vector<uint8_t> &data_list)
         }
     }
 }
+
 void SpineBoard::update_command()
 {
 }
+
+// -----------------------------------------------------------------------------
+// handle_udp_packet: entry point for received UDP from Teensy
+// -----------------------------------------------------------------------------
 void SpineBoard::handle_udp_packet(const udp::endpoint &client_endpoint, const std::vector<uint8_t> &data)
 {
     static std::chrono::time_point<std::chrono::steady_clock> last_time = std::chrono::steady_clock::now();
