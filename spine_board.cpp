@@ -424,7 +424,7 @@ void SpineBoard::start()
     send_thread = std::thread([&]()
                               {
             bool first_time = true;
-            int send_count = 0;
+            unsigned int send_count = 0;
             while (true) {
                 if (first_time)
                 {
@@ -449,14 +449,13 @@ void SpineBoard::start()
                 // Generate example data to send
                 std::vector<uint8_t> data_to_send(num_nodes * 8 * num_buses);
 
-                // Every ~2 s re-send Enter Motor Mode for bus 0 (Can0) so motor stays enabled
-                bool send_enter_mode = (++send_count % 200 == 0);
-
+                // Keep-alive: re-send Enter Motor Mode (Type 3) every 500 ms so motor stays enabled.
+                bool send_enter = (++send_count % 2500 == 0);
                 for (int j = 0; j < num_buses; j++) {
                     bus& current_bus = bus_list[j];
                     uint8_t* bus_data = data_to_send.data() + j * num_nodes * 8;
                     for (int i = 0; i < num_nodes; i++) {
-                        if (send_enter_mode && j == 0 && i == 0)
+                        if (send_enter && j == 0 && i == 0)
                             pack_enter_motor_mode_cmd(bus_data + i * 8);
                         else if (use_mit_pack_)
                             pack_cmd(bus_data + i * 8, current_bus, i);
@@ -471,13 +470,33 @@ void SpineBoard::start()
 }
 
 // -----------------------------------------------------------------------------
+// O2 parameter write (Type 18): build 48-byte packet [0x12, 8-byte payload, zeros], send to Teensy
+// -----------------------------------------------------------------------------
+void SpineBoard::sendParameterWriteU8(uint16_t param_id, uint8_t value)
+{
+    std::vector<uint8_t> payload(TEENSY_PAYLOAD_BYTES, 0);
+    payload[0] = 0x12;  // magic: Teensy sends as Type 18
+    payload[1] = (uint8_t)(param_id & 0xFF);
+    payload[2] = (uint8_t)(param_id >> 8);
+    payload[3] = 0;
+    payload[4] = 0;
+    payload[5] = value;  // U8 at byte index 4 in O2 Type 18 param write
+    payload[6] = 0;
+    payload[7] = 0;
+    send_data_to_teensy(payload, TEENSY_PAYLOAD_BYTES);
+}
+
+// -----------------------------------------------------------------------------
 // UDP send: build 48-byte payload + CRC, send to Teensy
 // -----------------------------------------------------------------------------
 void SpineBoard::send_data_to_teensy(const std::vector<uint8_t> &data, const int data_size)
 {
     // Teensy expects 48-byte payload (2 buses * 3 nodes * 8). Convert our 24-byte logical packet to 48-byte layout.
     std::vector<uint8_t> payload;
-    if (data_size == num_buses * num_nodes * 8 && data_size <= TEENSY_PAYLOAD_BYTES) {
+    if (data_size == TEENSY_PAYLOAD_BYTES && data[0] == 0x12) {
+        // Parameter write (Type 18): 48 bytes [0x12, 8-byte Type18 payload, zeros]; no layout conversion.
+        payload.assign(data.begin(), data.begin() + TEENSY_PAYLOAD_BYTES);
+    } else if (data_size == num_buses * num_nodes * 8 && data_size <= TEENSY_PAYLOAD_BYTES) {
         payload.resize(TEENSY_PAYLOAD_BYTES);
         to_teensy_48(data.data(), payload.data());
     } else {

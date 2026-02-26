@@ -47,6 +47,11 @@ const uint8_t RESET_COMMAND = 0xFF;
 static inline uint32_t makeO2ExtendedId(uint8_t motor_id, uint8_t type) {
     return ((uint32_t)(type & 0x1F) << 24) | ((uint32_t)(motor_id & 0xFF));
 }
+// Arduino/RobStride use 29-bit ID: (mode<<24)|(data<<8)|id. Type 1 puts torque in data (16-bit).
+// Use this for Type 1 so motor keeps running; 0 Nm = 32768 in 16-bit (-12..+12 Nm).
+static inline uint32_t makeO2ExtendedIdWithData(uint8_t motor_id, uint8_t type, uint16_t data16) {
+    return ((uint32_t)(type & 0x1F) << 24) | ((uint32_t)(data16 & 0xFFFF) << 8) | ((uint32_t)(motor_id & 0xFF));
+}
 
 static void sendSimpleEnableSequence() {
     CAN_message_t msg;
@@ -57,7 +62,6 @@ static void sendSimpleEnableSequence() {
     memcpy(msg.buf, payload, 8);
 
     Serial.println("Simple O2 enable sequence on both CAN buses.");
-
     // Stop (Type 4)
     msg.id = makeO2ExtendedId(MOTOR_ID, CANCOM_MOTOR_RESET);
     Serial.println("Stop (Type 4)...");
@@ -72,14 +76,12 @@ static void sendSimpleEnableSequence() {
     Can1.write(msg);
     delay(200);
 
-    // Enable (Type 3) — same as enable_motor_only.ino: no Type 1 here so motor stays still.
-    // First Type 1 comes from host (UDP) after init, with zero gains from final zero step.
+    // Enable (Type 3) — no Type 1 here so motor stays still until host sends.
     msg.id = makeO2ExtendedId(MOTOR_ID, CANCOM_MOTOR_ENABLE);
     Serial.println("Enable (Type 3)...");
     Can0.write(msg);
     Can1.write(msg);
     delay(200);
-
     Serial.println("Enable sequence sent.");
 }
 
@@ -107,15 +109,11 @@ void setup()
 {
     Serial.begin(115200);
     while (!Serial && millis() < 4000)
-    {
-        // Wait for Serial
-    }
+        ;
     printf("Starting...\r\n");
 
     setupEthernet();
     setupCAN();
-
-    // One-shot stop -> zero -> enable sequence on both CAN buses (same pattern as enable_motor_only.ino).
     sendSimpleEnableSequence();
     Serial.println("======== Setup ends ========");
 }
@@ -126,12 +124,10 @@ void setupEthernet()
     Ethernet.macAddress(mac);
     printf("MAC = %02x:%02x:%02x:%02x:%02x:%02x\r\n",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
     Ethernet.onLinkState([](bool state)
                          { printf("[Ethernet] Link %s\r\n", state ? "ON" : "OFF"); });
 
 #if USE_STATIC_IP
-    // Static IP: no DHCP, use teensyIP / teensySubnet / teensyGateway (QNEthernet: ip, netmask, gateway)
     printf("Starting Ethernet with static IP...\r\n");
     if (!Ethernet.begin(teensyIP, teensySubnet, teensyGateway))
     {
@@ -174,7 +170,6 @@ void setupCAN()
 
     Can0.onReceive(canReceive);
     Can0.setClock(CLK_60MHz);
-    // Can0.mailboxStatus();
     printf("Done setting up CAN 0\n");
 
     Can1.begin();
@@ -186,10 +181,9 @@ void setupCAN()
     Can1.onReceive(canReceive2);
     Can1.distribute();
     Can1.setClock(CLK_60MHz);
-    // Can1.mailboxStatus();
     printf("Done setting up CAN 1\n");
-
 }
+
 
 void printIPAddress()
 {
@@ -205,11 +199,18 @@ void printIPAddress()
     printf("    DNS          = %u.%u.%u.%u\r\n", ip[0], ip[1], ip[2], ip[3]);
 }
 
+// O2 Type 2 feedback: type in ID bits 28-24, motor ID in bits 7-0. Payload is p, v, torque, temp.
 void canReceive(const CAN_message_t &msg)
 {
-    int node_id = msg.buf[0] - 1;
-    if (node_id < 0 || node_id >= MAX_NODES)
-        return;  // avoid out-of-bounds: O2 feedback may have buf[0]=0 (motor ID) -> node_id=-1
+    uint8_t type = (uint8_t)((msg.id >> 24) & 0x1F);
+    if (type != 2)
+        return;  // only accept Type 2 (feedback)
+    uint8_t motor_id = (uint8_t)(msg.id & 0xFF);
+    int node_id = (int)(motor_id - MOTOR_ID);
+    if (node_id < 0)
+        node_id = 0;  // single-motor fallback: some drives send ID 0
+    if (node_id >= MAX_NODES)
+        return;
     memcpy(can_data[node_id], msg.buf, 8);
     unsigned long current_time = micros();
     unsigned long latency = current_time - last_packet_time_bus1[node_id];
@@ -227,11 +228,18 @@ void canReceive(const CAN_message_t &msg)
     last_packet_time_bus1[node_id] = current_time;
 }
 
+// O2 Type 2 feedback: type in ID bits 28-24, motor ID in bits 7-0.
 void canReceive2(const CAN_message_t &msg)
 {
-    int node_id = msg.buf[0] - 1;
-    if (node_id < 0 || node_id >= MAX_NODES)
-        return;  // avoid out-of-bounds: O2 feedback may have buf[0]=0 (motor ID) -> node_id=-1
+    uint8_t type = (uint8_t)((msg.id >> 24) & 0x1F);
+    if (type != 2)
+        return;
+    uint8_t motor_id = (uint8_t)(msg.id & 0xFF);
+    int node_id = (int)(motor_id - MOTOR_ID);
+    if (node_id < 0)
+        node_id = 0;
+    if (node_id >= MAX_NODES)
+        return;
     memcpy(can_data_bus2[node_id], msg.buf, 8);
     unsigned long current_time = micros();
     unsigned long latency = current_time - last_packet_time_bus2[node_id];
@@ -262,76 +270,49 @@ void loop()
     sendUDPPacket();
 }
 
+// Process all pending UDP packets so can_command is always the latest (avoids "rotate once" lag).
 void receiveUDPPacket()
 {
-    // noInterrupts();
-    int size = udp.parsePacket();
-    if (size > 0)
+    int size;
+    while ((size = udp.parsePacket()) > 0)
     {
         const uint8_t *data = udp.data();
-        // Print received UDP payload (length + hex bytes)
-        Serial.printf("UDP RX len=%d data=", size);
-        for (int i = 0; i < size && i < 64; i++)
-            Serial.printf("%02X ", data[i]);
-        Serial.println();
 
         if (size == 2 && data[0] == RESET_COMMAND)
         {
             reset();
-            printf("Reset command received. Buffers and variables reset.\n");
+        }
+        else if (size >= 49 && data[0] == 0x12)
+        {
+            uint8_t calculated_crc = calculate_crc8(data, 48);
+            if (data[48] == calculated_crc)
+            {
+                CAN_message_t msg;
+                msg.flags.extended = 1;
+                msg.id = makeO2ExtendedId(MOTOR_ID, 18);
+                msg.len = 8;
+                memcpy(msg.buf, data + 1, 8);
+                Can0.write(msg);
+            }
         }
         else if (size >= 2 * MAX_NODES * 8)
         {
-            if (!first_packet_recv)
-                printf("first packet recv\n");
             first_packet_recv = true;
-
-            // Extract the payload data
-            std::vector<uint8_t> payload(data, data + 2 * MAX_NODES * 8);
-
-            // Calculate CRC-8 for the payload
-            uint8_t calculated_crc = calculate_crc8(payload.data(), payload.size());
-
             if (size == 2 * MAX_NODES * 8 + 1)
             {
-                const uint8_t received_crc = data[2 * MAX_NODES * 8];
-
-                if (received_crc == calculated_crc)
+                uint8_t calculated_crc = calculate_crc8(data, 2 * MAX_NODES * 8);
+                if (data[2 * MAX_NODES * 8] == calculated_crc)
                 {
-                    // CRC check passed, process the data
                     for (int i = 0; i < MAX_NODES; i++)
-                    {
                         for (int j = 0; j < 8; j++)
-                        {
                             can_command[i][j] = data[i * 8 + j];
-                        }
-                    }
                     for (int i = 0; i < MAX_NODES; i++)
-                    {
                         for (int j = 0; j < 8; j++)
-                        {
                             can_command_bus2[i][j] = data[MAX_NODES * 8 + i * 8 + j];
-                        }
-                    }
-                    // sendCANCMD();
                 }
-                else
-                {
-                    // CRC check failed, discard the data
-                    printf("CRC check failed\n");
-                    printf("Received CRC: %02X\n", received_crc);
-                    printf("Calculated CRC: %02X\n", calculated_crc);
-                }
-                // printCANCommand();
-            }
-            else
-            {
-                printf("Invalid packet size\n");
             }
         }
     }
-
-    // interrupts();
 }
 void printCANCommand()
 {
@@ -340,9 +321,7 @@ void printCANCommand()
     {
         printf("Node %d: ", i + 1);
         for (int j = 0; j < 8; j++)
-        {
             printf("%02X ", can_command[i][j]);
-        }
         printf("\n");
     }
     printf("CAN Command bus 2:\n");
@@ -350,9 +329,7 @@ void printCANCommand()
     {
         printf("Node %d: ", i + 1);
         for (int j = 0; j < 8; j++)
-        {
             printf("%02X ", can_command_bus2[i][j]);
-        }
         printf("\n");
     }
 }
@@ -361,6 +338,9 @@ void printCANCommand()
 #define O2_MAGIC_ENTER 0xFC  // enter motor mode → Type 3 enable
 #define O2_MAGIC_ZERO  0xFE  // zero encoder → Type 6
 #define O2_TYPE_CTRL   1     // normal position/velocity control
+
+// 0 Nm in 16-bit for -12..+12 Nm range: (0 - (-12)) / 24 * 65535 ≈ 32768
+#define O2_TYPE1_DATA_ZERO_NM  32768u
 
 static uint32_t getO2CanId(uint8_t node_index, const uint8_t *cmd8) {
     uint8_t motor_id = (node_index == 0) ? MOTOR_ID : (MOTOR_ID + node_index);
@@ -371,8 +351,10 @@ static uint32_t getO2CanId(uint8_t node_index, const uint8_t *cmd8) {
         type = 3;
     else if (cmd8[7] == O2_MAGIC_ZERO)
         type = 6;
-    else
+    else {
         type = O2_TYPE_CTRL;
+        return makeO2ExtendedIdWithData(motor_id, type, (uint16_t)O2_TYPE1_DATA_ZERO_NM);
+    }
     return makeO2ExtendedId(motor_id, type);
 }
 
@@ -413,10 +395,7 @@ void sendUDPPacket()
         memcpy(buffer_ptr, can_data_bus2[i], 8);
         buffer_ptr += 8;
     }
-    if (!udp.send("192.168.0.100", kPort, buffer, MAX_NODES * 8 * 2))  // PC host (match ETHERNET_SETUP.md)
-    {
-        printf("ERROR.");
-    }
+    udp.send("192.168.0.100", kPort, buffer, MAX_NODES * 8 * 2);  // PC host (match ETHERNET_SETUP.md)
 }
 
 void reset()

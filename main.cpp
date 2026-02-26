@@ -1,6 +1,9 @@
 #include "spine_board.h"
+#include "robstride_o2/robstride_o2_motor.h"
 #include <cmath>
+#include <chrono>
 #include <limits>
+#include <thread>
 
 struct ActuatorInfo
 {
@@ -82,7 +85,7 @@ int main()
     std::cout << "  0: Enable only (no Type 1 commands)\n";
     std::cout << "  1: Private – position step to 0.2 rad\n";
     std::cout << "  2: Private – position sine (amp=0.2 rad, 1 rad/s)\n";
-    std::cout << "  3: MIT – same as 1 but MIT payload (16b p + 12b v,kp,kd,torque), t_ff=0.5 Nm\n";
+    std::cout << "  3: MIT – position sine wave (MIT payload: 16b p + 12b v,kp,kd,torque)\n";
     std::cout << "  4: Private – velocity hold v_des=0.2 rad/s\n";
     std::cout << "Mode: " << std::flush;
 
@@ -99,6 +102,16 @@ int main()
     }
     else
     {
+        // Send O2 RUN_MODE (0x7005) = 0 (operation) so motor accepts Type 1 in the loop.
+        // Use operation mode for all 1–4: Type 1 carries p_des, v_des, Kp, Kd (velocity hold = set v_des).
+        const uint16_t RUN_MODE = O2ParamId::RUN_MODE;
+        const uint8_t run_mode_value = static_cast<uint8_t>(O2ControlMode::OperationControl);
+        for (auto &board : _spine_boards)
+        {
+            board->sendParameterWriteU8(RUN_MODE, run_mode_value);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
         bool use_mit = (mode == 3);
         for (auto &board : _spine_boards)
         {
@@ -107,6 +120,17 @@ int main()
         }
 
         std::cout << "Running control test (Ctrl+C to stop)...\n";
+
+        // Setpoints for control modes (rad, rad/s, Nm). Larger amplitude = more visible motion.
+        const float MIT_SINE_AMP = 1.0f;    // MIT sine amplitude (rad) — was 0.2; 1.0 ≈ 57°
+        const float MIT_SINE_OMEGA = 1.0f;  // MIT sine angular frequency (rad/s)
+        const float MIT_TORQUE_FF = 0.0f;   // torque feedforward for MIT (Nm)
+        const float PRIVATE_SINE_AMP = 1.0f;   // Private mode 2 sine amplitude (rad)
+        const float PRIVATE_VELOCITY = 0.2f;   // velocity for Private velocity mode (mode 4)
+
+        // Center sine around current position so we don't command one big step (avoids "rotate once then stop").
+        float p_center = 0.0f;
+        bool center_initialized = false;
 
         int iter = 0;
         while (true)
@@ -120,24 +144,35 @@ int main()
                 auto info = ACTUATOR_INFO_MAP[i];
                 auto &bus_list = boards_bus_lists[info.board];
 
+                if (!center_initialized && (mode == 2 || mode == 3))
+                {
+                    p_center = bus_list[info.bus].state.j[info.node].p;
+                    center_initialized = true;
+                }
+
                 float p_target = 0.0f;
                 float v_target = 0.0f;
                 float t_ff = 0.0f;
 
-                if (mode == 1 || mode == 3)
+                if (mode == 1)
                 {
                     p_target = 0.2f;
-                    if (mode == 3)
-                        t_ff = 0.5f;
                 }
                 else if (mode == 2)
                 {
                     float t = iter * dt;
-                    p_target = 0.2f * std::sin(t);
+                    p_target = p_center + PRIVATE_SINE_AMP * std::sin(t);
+                }
+                else if (mode == 3)
+                {
+                    float t = iter * dt;
+                    p_target = p_center + MIT_SINE_AMP * std::sin(MIT_SINE_OMEGA * t);
+                    v_target = MIT_SINE_AMP * MIT_SINE_OMEGA * std::cos(MIT_SINE_OMEGA * t);  // derivative for feedforward
+                    t_ff = MIT_TORQUE_FF;
                 }
                 else if (mode == 4)
                 {
-                    v_target = 0.2f;
+                    v_target = PRIVATE_VELOCITY;
                 }
 
                 // Type 1 limits (PROTOCOL_REFERENCE): Kp 0–500, Kd 0–5. Ki not in frame (set via param 0x2015 if needed).

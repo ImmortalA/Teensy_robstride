@@ -142,3 +142,22 @@ These strings appear in the official tool; they configure the **adapter**, not t
 3. **Motor types 0 and 1:** If the motor doesn’t respond, try ensuring it is in the same “motor type” as in the tool (e.g. type 0 = Private extended); we don’t know the exact register yet (likely a parameter write, Type 17/18/21–26 in the manual).
 4. **Kp / Kd / Torque:** The tool exposes all three; our `pack_cmd` (p, v, Kp, Kd, t_ff) matches this. If the motor expects **Private Type 1** (four 16-bit, no torque), we still need a separate pack path as in the checklist above.
 5. **Debugging:** If you have the USB-CAN adapter, you can run motor_tool on Windows, set 1 Mbps + extended frame, and capture traffic to compare CAN IDs and payloads with what the Teensy sends.
+
+---
+
+## Comparison with RobStride Arduino (`extra_materials/RobStride_Control-master/arduino/`)
+
+Differences that can cause “motor rotates once then stops” and what we did:
+
+| Item | Arduino | Ours (before fix) | Fix |
+|------|---------|-------------------|-----|
+| **29-bit ID for Type 1** | `(mode<<24)\|(data<<8)\|id` with **data = torque** (16-bit, -12..+12 Nm) | `(type<<24)\|motor_id` (data = 0) | Teensy now uses `makeO2ExtendedIdWithData(motor_id, 1, 32768)` for Type 1 (0 Nm in data field). |
+| **Enter Motor Mode (Type 3)** | Sent **once** at init after Change_Mode and params | Re-sent every ~2 s in the send loop | Removed periodic re-send; send Type 3 only at init. |
+| **Change_Mode (Type 18)** | Called **before** Motor_Enable; then Set_SingleParameter(LIMIT_SPD, LOC_KP, …) | We send RUN_MODE **after** enable, when user picks mode | We send RUN_MODE=0 (operation) before the control loop so the motor accepts Type 1. Use **RUN_MODE=0 for all test modes** (1–4); do not use RUN_MODE=2 for “velocity” or the motor may ignore Type 1 and stop after one move. |
+| **Init order (Arduino)** | Zero → Change_Mode → Set params (LIMIT_SPD, LOC_KP, SPD_KP, SPD_KI, LIMIT_CUR) → Motor_Enable | Stop → Zero → Enable at boot; RUN_MODE when user selects mode | We do not set LIMIT_SPD/LOC_KP/etc. after Change_Mode; add if needed for stability. |
+
+What we still do **not** do (optional from Arduino):
+
+- **Set_SingleParameter** after Change_Mode: LIMIT_SPD (0x7017), LOC_KP (0x701E), SPD_KP, SPD_KI, LIMIT_CUR. Add if the motor is stiff or oscillates.
+- **Torque in ID from PC:** We use a constant 0 Nm (32768) in the Type 1 ID. To send real feedforward torque from the PC would require a 10-byte-per-node packet (2 bytes data + 8 bytes p,v,kp,kd) and Teensy support.
+- **Position mode (POS_MODE):** Arduino examples often use RUN_MODE=1 and set LOC_REF (0x7016) instead of streaming Type 1. We use operation mode (RUN_MODE=0) and stream Type 1.

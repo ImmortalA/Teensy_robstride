@@ -86,6 +86,8 @@ public:
     }
     void setAllowCommandSend(bool allow) { allow_command_send_ = allow; }
     void setUseMitPack(bool use) { use_mit_pack_ = use; }
+    /** Send O2 parameter write (Type 18) to Teensy; packet is forwarded as one CAN frame. */
+    void sendParameterWriteU8(uint16_t param_id, uint8_t value);
     ~SpineBoard()
     {
         for (int j = 0; j < num_buses; j++)
