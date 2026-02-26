@@ -458,6 +458,8 @@ void SpineBoard::start()
                     for (int i = 0; i < num_nodes; i++) {
                         if (send_enter_mode && j == 0 && i == 0)
                             pack_enter_motor_mode_cmd(bus_data + i * 8);
+                        else if (use_mit_pack_)
+                            pack_cmd(bus_data + i * 8, current_bus, i);
                         else
                             pack_cmd_private_o2(bus_data + i * 8, current_bus, i);
                     }

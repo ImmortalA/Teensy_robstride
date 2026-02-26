@@ -1,9 +1,9 @@
 #include "spine_board.h"
+#include <cmath>
+#include <limits>
 
-// -----------------------------------------------------------------------------
-// Actuator mapping: which (board, bus, node) each logical actuator uses
-// -----------------------------------------------------------------------------
-struct ActuatorInfo {
+struct ActuatorInfo
+{
     int board;
     int bus;
     int node;
@@ -77,38 +77,91 @@ int main()
             break;
     }
 
-    // -------- Run: enable only, wait for user to exit --------
-    std::cout << "Running SpineBoard... Motor enabled. No position commands sent." << std::endl;
-    std::cout << "Press Enter to exit." << std::flush;
-    std::cin.get();
+    // -------- Select test mode --------
+    std::cout << "Select test mode (all use Type 1 operation control unless noted):\n";
+    std::cout << "  0: Enable only (no Type 1 commands)\n";
+    std::cout << "  1: Private – position step to 0.2 rad\n";
+    std::cout << "  2: Private – position sine (amp=0.2 rad, 1 rad/s)\n";
+    std::cout << "  3: MIT – same as 1 but MIT payload (16b p + 12b v,kp,kd,torque), t_ff=0.5 Nm\n";
+    std::cout << "  4: Private – velocity hold v_des=0.2 rad/s\n";
+    std::cout << "Mode: " << std::flush;
 
-    // -------- Position control (commented out: enable only, no position send) --------
-    // // Command fields (see joint_control in utils.h): p_des, v_des, kp, kd, t_ff
-    // // Robostride O2 limits (utils.h): p [-12.5, 12.5] rad, v [-45, 45], kp [0, 500], kd [0, 5], t_ff [-15, 15] Nm
-    // while (true)
-    // {
-    //     static int iter = 0;
-    //     std::vector<std::vector<bus>> boards_bus_lists(NUM_ACTUATOR_TEENSY);
-    //     for (size_t b = 0; b < NUM_ACTUATOR_TEENSY; b++)
-    //         boards_bus_lists[b] = _spine_boards[b]->getBusList();
-    //     for (size_t i = 0; i < ACTUATOR_INFO_MAP.size(); i++)
-    //     {
-    //         auto info = ACTUATOR_INFO_MAP[i];
-    //         auto &bus_list = boards_bus_lists[info.board];
-    //         std::cout << "Motor (board 0 CAN 0): p=" << bus_list[info.bus].state.j[info.node].p << std::endl;
-    //         float p_target = 0.2f;
-    //         bus_list[info.bus].command.j[info.node].p_des = p_target;
-    //         bus_list[info.bus].command.j[info.node].v_des = 0.0f;
-    //         bus_list[info.bus].command.j[info.node].kp = 20.0f;
-    //         bus_list[info.bus].command.j[info.node].kd = 2.5f;
-    //         bus_list[info.bus].command.j[info.node].t_ff = 0.0f;
-    //     }
-    //     for (size_t b = 0; b < NUM_ACTUATOR_TEENSY; b++)
-    //         _spine_boards[b]->setBusList(boards_bus_lists[b]);
-    //     std::cout << "=====================" << std::endl;
-    //     iter++;
-    //     std::this_thread::sleep_for(std::chrono::microseconds(dt_us));
-    // }
+    int mode = 0;
+    if (!(std::cin >> mode))
+        mode = 0;
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    if (mode == 0)
+    {
+        std::cout << "Running SpineBoard... Motor enabled. No position commands sent." << std::endl;
+        std::cout << "Press Enter to exit." << std::flush;
+        std::cin.get();
+    }
+    else
+    {
+        bool use_mit = (mode == 3);
+        for (auto &board : _spine_boards)
+        {
+            board->setAllowCommandSend(true);
+            board->setUseMitPack(use_mit);
+        }
+
+        std::cout << "Running control test (Ctrl+C to stop)...\n";
+
+        int iter = 0;
+        while (true)
+        {
+            std::vector<std::vector<bus>> boards_bus_lists(NUM_ACTUATOR_TEENSY);
+            for (size_t b = 0; b < NUM_ACTUATOR_TEENSY; b++)
+                boards_bus_lists[b] = _spine_boards[b]->getBusList();
+
+            for (size_t i = 0; i < ACTUATOR_INFO_MAP.size(); i++)
+            {
+                auto info = ACTUATOR_INFO_MAP[i];
+                auto &bus_list = boards_bus_lists[info.board];
+
+                float p_target = 0.0f;
+                float v_target = 0.0f;
+                float t_ff = 0.0f;
+
+                if (mode == 1 || mode == 3)
+                {
+                    p_target = 0.2f;
+                    if (mode == 3)
+                        t_ff = 0.5f;
+                }
+                else if (mode == 2)
+                {
+                    float t = iter * dt;
+                    p_target = 0.2f * std::sin(t);
+                }
+                else if (mode == 4)
+                {
+                    v_target = 0.2f;
+                }
+
+                // Type 1 limits (PROTOCOL_REFERENCE): Kp 0–500, Kd 0–5. Ki not in frame (set via param 0x2015 if needed).
+                bus_list[info.bus].command.j[info.node].p_des = p_target;
+                bus_list[info.bus].command.j[info.node].v_des = v_target;
+                bus_list[info.bus].command.j[info.node].kp = 25.0f;   // typical 25–30 from docs; max 500
+                bus_list[info.bus].command.j[info.node].kd = 2.5f;    // damping 2–5 typical; max 5
+                bus_list[info.bus].command.j[info.node].t_ff = t_ff;
+
+                if (iter % 100 == 0)
+                {
+                    std::cout << "p=" << bus_list[info.bus].state.j[info.node].p
+                              << " p_des=" << p_target << " v_des=" << v_target
+                              << " t_ff=" << t_ff << std::endl;
+                }
+            }
+
+            for (size_t b = 0; b < NUM_ACTUATOR_TEENSY; b++)
+                _spine_boards[b]->setBusList(boards_bus_lists[b]);
+
+            iter++;
+            std::this_thread::sleep_for(std::chrono::microseconds(dt_us));
+        }
+    }
 
     // -------- Cleanup --------
     for (size_t id = 0; id < _spine_boards.size(); ++id)

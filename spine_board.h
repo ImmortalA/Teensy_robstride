@@ -34,6 +34,7 @@ private:
     std::thread send_thread;
     std::string board_name;
     std::atomic<bool> allow_command_send_{false};  // when false, send thread does not send Type 1 after init
+    std::atomic<bool> use_mit_pack_{false};        // when true, send thread uses pack_cmd (MIT) instead of pack_cmd_private_o2
 
 public:
     SpineBoard(const std::string &ip, const std::string &interface, int port, int nodes, int buses, std::string board_name = "board_1");
@@ -84,6 +85,7 @@ public:
         bus_list = new_bus_list;
     }
     void setAllowCommandSend(bool allow) { allow_command_send_ = allow; }
+    void setUseMitPack(bool use) { use_mit_pack_ = use; }
     ~SpineBoard()
     {
         for (int j = 0; j < num_buses; j++)

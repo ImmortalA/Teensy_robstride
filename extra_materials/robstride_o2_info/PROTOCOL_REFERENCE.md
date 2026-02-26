@@ -51,6 +51,8 @@ Manual 4.1.2: **All 16-bit** (high byte first):
 
 **No torque** in this Type 1 description.
 
+**Kp / Kd / Ki note:** Type 1 carries only **Kp** and **Kd**. **Ki** is not in the frame; it is a motor-internal (velocity loop) parameter. Set Ki via parameter write (Type 18), e.g. velocity KI at 0x2015 (typical 0.002–0.02). Recommended tuning order (from RobStride examples): position Kp → velocity Kp (our Kd) → velocity Ki (parameter only). Typical values: Kp 25–30 (up to 500), Kd 2–5.
+
 Our **utils.h** `pack_cmd()` uses **MIT-style** packing: 16b position + 12b velocity + 12b Kp + 12b Kd + 12b torque (packed in 8 bytes). So:
 
 - **If the motor is in Private protocol** and expects Type 1 as above → our payload format is **different** (we use 12-bit fields and include torque). You may need a separate pack path for “Private Type 1” (16-bit each, no torque) if the motor ignores or misreads our current payload.

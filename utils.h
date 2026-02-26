@@ -1,6 +1,8 @@
 #ifndef SPINE_UTILS_H
 #define SPINE_UTILS_H
 #include <cmath>
+#include <vector>
+#include <cstdio>
 
 // Robostride O2 (extended CAN protocol: id|data|mode in 29-bit ID)
 #define P_MIN_ROBOSTRIDE_O2 -12.5f
