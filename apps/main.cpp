@@ -15,7 +15,7 @@ struct ActuatorInfo
 int main()
 {
     // -------- Hardware / topology --------
-    // Single Teensy, 2 motors on board 0 CAN 0 (Can0) via daisy chain (IDs MOTOR_ID, MOTOR_ID+1)
+    // Single Teensy, 3 motors on board 0 CAN 0 (Can0) via daisy chain (IDs MOTOR_ID, MOTOR_ID+1, MOTOR_ID+2)
     constexpr static int NUM_ACTUATOR_TEENSY = 1;
     constexpr static int ACTUATOR_MAX_NUM_CAN_BUSES = 2;   // Can0, Can1 (48-byte packet = 2*3*8)
     constexpr static int ACTUATOR_MAX_NUM_NODES_PER_BUS = 3;
@@ -30,13 +30,14 @@ int main()
     constexpr static int RC_PORT = 8001;
 
     // -------- Actuator map and params --------
-    // Two motors on board 0, bus 0 (Can0): node 0 = first motor, node 1 = second motor (daisy chain)
+    // Three motors on board 0, bus 0 (Can0): node 0, 1, 2 (daisy chain, CAN IDs MOTOR_ID, MOTOR_ID+1, MOTOR_ID+2)
     static std::vector<ActuatorInfo> ACTUATOR_INFO_MAP = {
         {0, 0, 0},  // motor 1 (CAN ID = MOTOR_ID)
         {0, 0, 1},  // motor 2 (CAN ID = MOTOR_ID+1)
+        {0, 0, 2},  // motor 3 (CAN ID = MOTOR_ID+2)
     };
 
-    // board 0: 2 buses × 3 nodes (fill all slots for 48-byte packet; only nodes 0,1 on bus 0 are used)
+    // board 0: 2 buses × 3 nodes (fill all slots for 48-byte packet; nodes 0,1,2 on bus 0 are used)
     static std::vector<std::vector<std::vector<ActuatorParams>>> ACTUATOR_PARAMS = {
         {
             {getActuatorParams(ActuatorType::ROBOSTRIDE_O2), getActuatorParams(ActuatorType::ROBOSTRIDE_O2), getActuatorParams(ActuatorType::ROBOSTRIDE_O2)},

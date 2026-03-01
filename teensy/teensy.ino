@@ -5,10 +5,10 @@
  *   (C) One-shot: Teensy CAN send -> receive Type 2 response (send->response, us and Hz)
  *
  * Every MAX_NUM_SAMPLES feedbacks, prints per-node stats and a single-line
- * "Daisy Can0" summary for motor 0 and motor 1.
+ * "Daisy Can0" summary for motor 0, 1, 2.
  *
- * Use with host app: daisy_chain_2_motors (apps/demo03_daisy_chain_2_motors.cpp).
- * Two motors on Can0: IDs MOTOR_ID and MOTOR_ID+1.
+ * Use with host app: main (apps/main.cpp) or daisy_chain_2_motors.
+ * Three motors on Can0: IDs MOTOR_ID, MOTOR_ID+1, MOTOR_ID+2.
  */
 
  #include <FlexCAN_T4.h>
@@ -28,11 +28,12 @@
  #endif
  constexpr uint32_t kDHCPTimeout = 15000; // 15 seconds
  constexpr uint16_t kPort = 8003;         // udp port (board 0; test_spine listens here, PC = 192.168.0.100)
+ constexpr uint16_t kLogPort = 8005;      // udp port for send->response log (bus,node,hz,us per motor)
  constexpr int MAX_NODES = 3;             // Maximum number of nodes
  constexpr int MAX_NUM_SAMPLES = 5000;
  
- // Number of motors on Bus 1 (Can0) to wait for before next batch. Set to 1 for single motor, 2 for daisy chain.
-constexpr int NUM_DAISY_MOTORS = 2;
+ // Number of motors on Bus 1 (Can0) to wait for before next batch. Set to 1 for single motor, 2 or 3 for daisy chain.
+constexpr int NUM_DAISY_MOTORS = 3;
 
 EthernetUDP udp;
  
@@ -65,14 +66,19 @@ EthernetUDP udp;
  unsigned long udp_cmd_start_time_bus2[MAX_NODES] = {0};
  bool          udp_cmd_waiting_fb_bus2[MAX_NODES] = {false};
  
-// Last printed avg cmd->fb for daisy summary (Bus 1 nodes 0 and 1)
-static unsigned long last_printed_cmd_to_fb_daisy[2] = {0};
+// Last printed avg cmd->fb for daisy summary (Bus 1 nodes 0..NUM_DAISY_MOTORS-1)
+static unsigned long last_printed_cmd_to_fb_daisy[MAX_NODES] = {0};
 
-// Wait for both daisy motors' Type 2 before accepting next UDP batch (send 1&2 -> wait both -> next batch)
+// Wait for all daisy motors' Type 2 before accepting next UDP batch (send 1,2,3 -> wait all -> next batch)
 static bool waiting_for_both_bus1 = false;
 static bool fb_received_bus1[NUM_DAISY_MOTORS] = {false};
 static bool pending_can_send = false;
 static bool pending_udp_send = false;
+
+// Response data: send per-motor send->response (bus,node,hz,us) over Ethernet. Set 1 to enable, 0 to disable.
+#define ENABLE_RESPONSE_LOG  1
+static char freq_log_line[64];
+static bool freq_header_sent = false;
 
 bool first_packet_recv = false;
 const uint8_t RESET_COMMAND = 0xFF;
@@ -93,8 +99,8 @@ const uint8_t RESET_COMMAND = 0xFF;
      return ((uint32_t)(type & 0x1F) << 24) | ((uint32_t)(data16 & 0xFFFF) << 8) | ((uint32_t)(motor_id & 0xFF));
  }
  
- // Number of motors to enable at startup on each bus (1..MAX_NODES). Use 2 for daisy chain of 2 motors.
- #define NUM_MOTORS_ENABLE_AT_STARTUP  2
+ // Number of motors to enable at startup on each bus (1..MAX_NODES). Use 3 for daisy chain of 3 motors.
+ #define NUM_MOTORS_ENABLE_AT_STARTUP  3
  
  static void sendSimpleEnableSequence() {
      CAN_message_t msg;
@@ -104,7 +110,7 @@ const uint8_t RESET_COMMAND = 0xFF;
      msg.len = 8;
      memcpy(msg.buf, payload, 8);
  
-     Serial.println("Simple O2 enable sequence on both CAN buses (daisy: 2 motors).");
+     Serial.println("Simple o2 enable sequence on both CAN buses (daisy: 3 motors).");
      for (int n = 0; n < NUM_MOTORS_ENABLE_AT_STARTUP && n < MAX_NODES; n++) {
          uint8_t id = (n == 0) ? MOTOR_ID : (MOTOR_ID + n);
          // Stop (Type 4)
@@ -161,13 +167,16 @@ const uint8_t RESET_COMMAND = 0xFF;
          ;
      printf("E06 Daisy chain feedback timing - starting...\r\n");
  
-     setupEthernet();
-     setupCAN();
-     sendSimpleEnableSequence();
-     printf("Daisy chain: set motor 1 = CAN ID %d, motor 2 = CAN ID %d (else you only see 'Bus 1 node 1').\n",
-            (int)MOTOR_ID, (int)MOTOR_ID + 1);
-     Serial.println("======== Setup ends (run daisy_chain_2_motors on PC) ========");
- }
+    setupEthernet();
+    setupCAN();
+    sendSimpleEnableSequence();
+#if ENABLE_RESPONSE_LOG
+    Serial.println("Frequency log: bus,node,hz,us to 192.168.0.100:8005 (nc -u -l 8005 > freq.csv)");
+#endif
+    printf("Daisy chain: motor 1 = CAN ID %d, motor 2 = %d, motor 3 = %d (else you only see 'Bus 1 node 1').\n",
+            (int)MOTOR_ID, (int)MOTOR_ID + 1, (int)MOTOR_ID + 2);
+    Serial.println("======== Setup ends (run test_spine on PC) ========");
+}
  
  void setupEthernet()
  {
@@ -308,6 +317,16 @@ void canReceive(const CAN_message_t &msg)
         unsigned long cmd_to_fb_us = current_time - last_cmd_time_bus1[node_id];
         float hz = (cmd_to_fb_us > 0) ? (1000000.0f / (float)cmd_to_fb_us) : 0.0f;
         printf("Bus 1 node %d: send->response %.2f Hz (%lu us)\n", node_id + 1, hz, cmd_to_fb_us);
+#if ENABLE_RESPONSE_LOG
+        if (!freq_header_sent)
+        {
+            udp.send("192.168.0.100", kLogPort, (const uint8_t *)"bus,node,hz,us\n", 14);
+            freq_header_sent = true;
+        }
+        int len = snprintf(freq_log_line, sizeof(freq_log_line), "1,%d,%.2f,%lu\n", node_id + 1, hz, cmd_to_fb_us);
+        if (len > 0)
+            udp.send("192.168.0.100", kLogPort, (const uint8_t *)freq_log_line, (size_t)len);
+#endif
         udp_cmd_waiting_fb_bus1[node_id] = false;
     }
  
@@ -318,16 +337,23 @@ void canReceive(const CAN_message_t &msg)
         if (cmd_count_bus1[node_id] > 0)
             average_cmd_to_fb = total_cmd_latency_bus1[node_id] / cmd_count_bus1[node_id];
 
-        // Daisy summary: store this node's avg and print combined line when we have both motors
+        // Daisy summary: store this node's avg and print combined line when we have all daisy motors
          if (node_id < NUM_DAISY_MOTORS)
          {
              last_printed_cmd_to_fb_daisy[node_id] = average_cmd_to_fb;
-             if (node_id == 1 && last_printed_cmd_to_fb_daisy[0] != 0)
+             bool all_set = true;
+             for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                 if (last_printed_cmd_to_fb_daisy[i] == 0) { all_set = false; break; }
+             if (all_set)
              {
-                 printf("Daisy Can0 timing: motor0=%lu us  motor1=%lu us\n",
-                        last_printed_cmd_to_fb_daisy[0], last_printed_cmd_to_fb_daisy[1]);
-                 last_printed_cmd_to_fb_daisy[0] = 0;
-                 last_printed_cmd_to_fb_daisy[1] = 0;
+                 if (NUM_DAISY_MOTORS == 2)
+                     printf("Daisy Can0 timing: motor0=%lu us  motor1=%lu us\n",
+                            last_printed_cmd_to_fb_daisy[0], last_printed_cmd_to_fb_daisy[1]);
+                 else
+                     printf("Daisy Can0 timing: motor0=%lu us  motor1=%lu us  motor2=%lu us\n",
+                            last_printed_cmd_to_fb_daisy[0], last_printed_cmd_to_fb_daisy[1], last_printed_cmd_to_fb_daisy[2]);
+                 for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                     last_printed_cmd_to_fb_daisy[i] = 0;
              }
          }
  
@@ -378,6 +404,16 @@ void canReceive2(const CAN_message_t &msg)
         unsigned long cmd_to_fb_us = current_time - last_cmd_time_bus2[node_id];
         float hz = (cmd_to_fb_us > 0) ? (1000000.0f / (float)cmd_to_fb_us) : 0.0f;
         printf("Bus 2 node %d: send->response %.2f Hz (%lu us)\n", node_id + 1, hz, cmd_to_fb_us);
+#if ENABLE_RESPONSE_LOG
+        if (!freq_header_sent)
+        {
+            udp.send("192.168.0.100", kLogPort, (const uint8_t *)"bus,node,hz,us\n", 14);
+            freq_header_sent = true;
+        }
+        int len = snprintf(freq_log_line, sizeof(freq_log_line), "2,%d,%.2f,%lu\n", node_id + 1, hz, cmd_to_fb_us);
+        if (len > 0)
+            udp.send("192.168.0.100", kLogPort, (const uint8_t *)freq_log_line, (size_t)len);
+#endif
         udp_cmd_waiting_fb_bus2[node_id] = false;
     }
  
@@ -442,7 +478,7 @@ void canReceive2(const CAN_message_t &msg)
          }
         else if (size >= 2 * MAX_NODES * 8)
         {
-            // Only accept next batch when we have received Type 2 from both daisy motors (Bus 1 node 0 and 1)
+            // Only accept next batch when we have received Type 2 from all daisy motors (Bus 1 nodes 0..NUM_DAISY_MOTORS-1)
             if (!waiting_for_both_bus1 && size == 2 * MAX_NODES * 8 + 1)
             {
                 uint8_t calculated_crc = calculate_crc8(data, 2 * MAX_NODES * 8);
@@ -542,17 +578,17 @@ void canReceive2(const CAN_message_t &msg)
          last_cmd_time_bus2[i] = now;
      }
  }
- void sendUDPPacket()
+void sendUDPPacket()
  {
      uint8_t buffer[MAX_NODES * 8 * 2];
      uint8_t *buffer_ptr = buffer;
- 
+
      for (int i = 0; i < MAX_NODES; i++)
      {
          memcpy(buffer_ptr, can_data[i], 8);
          buffer_ptr += 8;
      }
- 
+
      for (int i = 0; i < MAX_NODES; i++)
      {
          memcpy(buffer_ptr, can_data_bus2[i], 8);
@@ -568,8 +604,11 @@ void reset()
     memset(can_command_bus2, 0, sizeof(can_command_bus2));
     memset(can_data_bus2, 0, sizeof(can_data_bus2));
     first_packet_recv = false;
-    last_printed_cmd_to_fb_daisy[0] = 0;
-    last_printed_cmd_to_fb_daisy[1] = 0;
+#if ENABLE_RESPONSE_LOG
+    freq_header_sent = false;
+#endif
+    for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+        last_printed_cmd_to_fb_daisy[i] = 0;
     waiting_for_both_bus1 = false;
     pending_can_send = false;
     pending_udp_send = false;
