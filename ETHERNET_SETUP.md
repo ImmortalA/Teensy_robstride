@@ -47,10 +47,22 @@ Other settings:
 
 - **kPort** = 8003 (board 0). Use 8004 for a second Teensy (board 1).
 - **udp.send("192.168.0.100", kPort, ...)** → PC IP; host receives on 8003/8004.
+- **O2_FEEDBACK_ID_MIDDLE_BYTE** = 1: Type 2 feedback motor ID from middle byte of 29-bit CAN ID. If 2 motors (daisy) and only "Bus 1 node 1" appears, set to `1`; if single-motor breaks, set to `0`.
+- **NUM_DAISY_MOTORS** (teensy.ino, E06): number of motors on Bus 1 to wait for before accepting the next UDP batch. Set to **1** for single motor, **2** for daisy chain. E03 and E04 use 1.
+
+### Send → wait for response → next batch
+
+The firmware accepts a UDP control packet only after it has received Type 2 feedback from the expected motor(s) for the current batch. So: send CAN commands for motor(s) → wait for Type 2 from each → send UDP reply to PC → then accept next UDP batch. This avoids mixing rounds or missing feedback. Set `NUM_DAISY_MOTORS` to match 1 or 2 motors.
 
 ---
 
-## 4. Checklist
+## 4. Serial timing (teensy.ino / E04 / E06)
+
+Serial (115200) prints **send→response** once per batch per motor: time from Teensy CAN send to Type 2 receive (µs and Hz). For 2 motors on Can0, **Daisy Can0 timing: motor0=X us motor1=Y us** is printed when both have reported. The next UDP batch is accepted only after both responses (or the single motor’s response) are received.
+
+---
+
+## 5. Checklist
 
 - [ ] PC: enp8s0 = 192.168.0.100
 - [ ] apps (e.g. main.cpp): BOARD_INTERFACE_NAME = "enp8s0", ACTUATOR_TEENSY_BOARD_IPS[0] = "192.168.0.101"
@@ -59,7 +71,7 @@ Other settings:
 
 ---
 
-## 5. Motor not moving (feedback OK, no motion)
+## 6. Motor not moving (feedback OK, no motion)
 
 If you see `Motor (board 0 CAN 1): p=-12.5` (or other values) but the motor does not move:
 

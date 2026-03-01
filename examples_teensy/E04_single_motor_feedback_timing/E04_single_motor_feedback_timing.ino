@@ -49,6 +49,13 @@ bool          udp_cmd_waiting_fb_bus1[MAX_NODES] = {false};
 unsigned long udp_cmd_start_time_bus2[MAX_NODES] = {0};
 bool          udp_cmd_waiting_fb_bus2[MAX_NODES] = {false};
 
+// Single motor: wait for Type 2 response before accepting next UDP batch (send -> wait response -> next batch)
+constexpr int NUM_DAISY_MOTORS = 1;
+static bool waiting_for_both_bus1 = false;
+static bool fb_received_bus1[2] = {false};  // [0] = node 0; size 2 so loop is valid
+static bool pending_can_send = false;
+static bool pending_udp_send = false;
+
 bool first_packet_recv = false;
 const uint8_t RESET_COMMAND = 0xFF;
 
@@ -229,6 +236,23 @@ void canReceive(const CAN_message_t &msg)
     memcpy(can_data[node_id], msg.buf, 8);
     unsigned long current_time = micros();
 
+    // Mark feedback received; for single motor (node 0) allow next batch when response received
+    if (node_id < NUM_DAISY_MOTORS)
+    {
+        fb_received_bus1[node_id] = true;
+        if (waiting_for_both_bus1)
+        {
+            bool all = true;
+            for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                all = all && fb_received_bus1[i];
+            if (all)
+            {
+                waiting_for_both_bus1 = false;
+                pending_udp_send = true;
+            }
+        }
+    }
+
     // (A) Existing measurement: time between feedback frames
     unsigned long fb_interval = current_time - last_packet_time_bus1[node_id];
     total_latency_bus1[node_id] += fb_interval;
@@ -242,15 +266,12 @@ void canReceive(const CAN_message_t &msg)
         cmd_count_bus1[node_id]++;
     }
 
-    // (C) One-shot measurement: from last UDP control receive to first feedback (also as Hz)
-    if (udp_cmd_waiting_fb_bus1[node_id] && udp_cmd_start_time_bus1[node_id] != 0)
+    // (C) One-shot: time from Teensy CAN send to receive Type 2 response (send->response)
+    if (udp_cmd_waiting_fb_bus1[node_id] && last_cmd_time_bus1[node_id] != 0)
     {
-        unsigned long udp_to_fb = current_time - udp_cmd_start_time_bus1[node_id];
-        float udp_rate_hz = 0.0f;
-        if (udp_to_fb > 0)
-            udp_rate_hz = 1000000.0f / (float)udp_to_fb;
-        printf("Bus 1 node %d: UDP->feedback one-shot=%.2f Hz (%lu us)\n",
-               node_id + 1, udp_rate_hz, udp_to_fb);
+        unsigned long cmd_to_fb_us = current_time - last_cmd_time_bus1[node_id];
+        float hz = (cmd_to_fb_us > 0) ? (1000000.0f / (float)cmd_to_fb_us) : 0.0f;
+        printf("Bus 1 node %d: send->response %.2f Hz (%lu us)\n", node_id + 1, hz, cmd_to_fb_us);
         udp_cmd_waiting_fb_bus1[node_id] = false;
     }
 
@@ -302,15 +323,12 @@ void canReceive2(const CAN_message_t &msg)
         cmd_count_bus2[node_id]++;
     }
 
-    // (C) One-shot measurement: from last UDP control receive to first feedback (also as Hz)
-    if (udp_cmd_waiting_fb_bus2[node_id] && udp_cmd_start_time_bus2[node_id] != 0)
+    // (C) One-shot: time from Teensy CAN send to receive Type 2 response (send->response)
+    if (udp_cmd_waiting_fb_bus2[node_id] && last_cmd_time_bus2[node_id] != 0)
     {
-        unsigned long udp_to_fb = current_time - udp_cmd_start_time_bus2[node_id];
-        float udp_rate_hz = 0.0f;
-        if (udp_to_fb > 0)
-            udp_rate_hz = 1000000.0f / (float)udp_to_fb;
-        printf("Bus 2 node %d: UDP->feedback one-shot=%.2f Hz (%lu us)\n",
-               node_id + 1, udp_rate_hz, udp_to_fb);
+        unsigned long cmd_to_fb_us = current_time - last_cmd_time_bus2[node_id];
+        float hz = (cmd_to_fb_us > 0) ? (1000000.0f / (float)cmd_to_fb_us) : 0.0f;
+        printf("Bus 2 node %d: send->response %.2f Hz (%lu us)\n", node_id + 1, hz, cmd_to_fb_us);
         udp_cmd_waiting_fb_bus2[node_id] = false;
     }
 
@@ -339,11 +357,16 @@ void loop()
     Can1.events();
     receiveUDPPacket();
 
-    if (!first_packet_recv)
-        return;
-
-    sendCANCMD();
-    sendUDPPacket();
+    if (pending_can_send)
+    {
+        sendCANCMD();
+        pending_can_send = false;
+    }
+    if (pending_udp_send)
+    {
+        sendUDPPacket();
+        pending_udp_send = false;
+    }
 }
 
 // Process all pending UDP packets so can_command is always the latest (avoids "rotate once" lag).
@@ -373,12 +396,13 @@ void receiveUDPPacket()
         }
         else if (size >= 2 * MAX_NODES * 8)
         {
-            first_packet_recv = true;
-            if (size == 2 * MAX_NODES * 8 + 1)
+            // Only accept next batch when we have received Type 2 from motor (Bus 1 node 0 for single motor)
+            if (!waiting_for_both_bus1 && size == 2 * MAX_NODES * 8 + 1)
             {
                 uint8_t calculated_crc = calculate_crc8(data, 2 * MAX_NODES * 8);
                 if (data[2 * MAX_NODES * 8] == calculated_crc)
                 {
+                    first_packet_recv = true;
                     unsigned long now = micros();
                     for (int i = 0; i < MAX_NODES; i++)
                         for (int j = 0; j < 8; j++)
@@ -387,7 +411,11 @@ void receiveUDPPacket()
                         for (int j = 0; j < 8; j++)
                             can_command_bus2[i][j] = data[MAX_NODES * 8 + i * 8 + j];
 
-                    // Mark start of one-shot UDP->feedback timing for each node
+                    for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                        fb_received_bus1[i] = false;
+                    waiting_for_both_bus1 = true;
+                    pending_can_send = true;
+
                     for (int i = 0; i < MAX_NODES; i++)
                     {
                         udp_cmd_start_time_bus1[i] = now;
@@ -494,4 +522,9 @@ void reset()
     memset(can_command_bus2, 0, sizeof(can_command_bus2));
     memset(can_data_bus2, 0, sizeof(can_data_bus2));
     first_packet_recv = false;
+    waiting_for_both_bus1 = false;
+    pending_can_send = false;
+    pending_udp_send = false;
+    for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+        fb_received_bus1[i] = false;
 }

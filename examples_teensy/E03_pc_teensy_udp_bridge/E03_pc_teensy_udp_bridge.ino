@@ -34,6 +34,13 @@ unsigned long last_packet_time_bus2[MAX_NODES] = {0};
 unsigned long total_latency_bus2[MAX_NODES] = {0};
 unsigned int packet_count_bus2[MAX_NODES] = {0};
 
+// Wait for Type 2 response(s) before accepting next UDP batch. 1 = single motor, 2 = daisy chain.
+constexpr int NUM_DAISY_MOTORS = 1;
+static bool waiting_for_both_bus1 = false;
+static bool fb_received_bus1[2] = {false};
+static bool pending_can_send = false;
+static bool pending_udp_send = false;
+
 bool first_packet_recv = false;
 const uint8_t RESET_COMMAND = 0xFF;
 
@@ -212,6 +219,22 @@ void canReceive(const CAN_message_t &msg)
         return;  // avoid out-of-bounds: O2 feedback may have buf[0]=0 (motor ID) -> node_id=-1
     memcpy(can_data[node_id], msg.buf, 8);
     unsigned long current_time = micros();
+
+    if (node_id < NUM_DAISY_MOTORS)
+    {
+        fb_received_bus1[node_id] = true;
+        if (waiting_for_both_bus1)
+        {
+            bool all = true;
+            for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                all = all && fb_received_bus1[i];
+            if (all)
+            {
+                waiting_for_both_bus1 = false;
+                pending_udp_send = true;
+            }
+        }
+    }
     unsigned long latency = current_time - last_packet_time_bus1[node_id];
     total_latency_bus1[node_id] += latency;
     packet_count_bus1[node_id]++;
@@ -255,11 +278,16 @@ void loop()
     Can1.events();
     receiveUDPPacket();
 
-    if (!first_packet_recv)
-        return;
-
-    sendCANCMD();
-    sendUDPPacket();
+    if (pending_can_send)
+    {
+        sendCANCMD();
+        pending_can_send = false;
+    }
+    if (pending_udp_send)
+    {
+        sendUDPPacket();
+        pending_udp_send = false;
+    }
 }
 
 void receiveUDPPacket()
@@ -282,38 +310,30 @@ void receiveUDPPacket()
         }
         else if (size >= 2 * MAX_NODES * 8)
         {
-            if (!first_packet_recv)
-                printf("first packet recv\n");
-            first_packet_recv = true;
-
-            // Extract the payload data
-            std::vector<uint8_t> payload(data, data + 2 * MAX_NODES * 8);
-
-            // Calculate CRC-8 for the payload
-            uint8_t calculated_crc = calculate_crc8(payload.data(), payload.size());
-
-            if (size == 2 * MAX_NODES * 8 + 1)
+            // Only accept next batch when we have received Type 2 from expected motor(s) (Bus 1)
+            if (!waiting_for_both_bus1 && size == 2 * MAX_NODES * 8 + 1)
             {
+                std::vector<uint8_t> payload(data, data + 2 * MAX_NODES * 8);
+                uint8_t calculated_crc = calculate_crc8(payload.data(), payload.size());
                 const uint8_t received_crc = data[2 * MAX_NODES * 8];
 
                 if (received_crc == calculated_crc)
                 {
-                    // CRC check passed, process the data
+                    if (!first_packet_recv)
+                        printf("first packet recv\n");
+                    first_packet_recv = true;
+
                     for (int i = 0; i < MAX_NODES; i++)
-                    {
                         for (int j = 0; j < 8; j++)
-                        {
                             can_command[i][j] = data[i * 8 + j];
-                        }
-                    }
                     for (int i = 0; i < MAX_NODES; i++)
-                    {
                         for (int j = 0; j < 8; j++)
-                        {
                             can_command_bus2[i][j] = data[MAX_NODES * 8 + i * 8 + j];
-                        }
-                    }
-                    // sendCANCMD();
+
+                    for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+                        fb_received_bus1[i] = false;
+                    waiting_for_both_bus1 = true;
+                    pending_can_send = true;
                 }
                 else
                 {
@@ -322,9 +342,8 @@ void receiveUDPPacket()
                     printf("Received CRC: %02X\n", received_crc);
                     printf("Calculated CRC: %02X\n", calculated_crc);
                 }
-                // printCANCommand();
             }
-            else
+            else if (size != 2 * MAX_NODES * 8 + 1)
             {
                 printf("Invalid packet size\n");
             }
@@ -426,4 +445,9 @@ void reset()
     memset(can_command_bus2, 0, sizeof(can_command_bus2));
     memset(can_data_bus2, 0, sizeof(can_data_bus2));
     first_packet_recv = false;
+    waiting_for_both_bus1 = false;
+    pending_can_send = false;
+    pending_udp_send = false;
+    for (int i = 0; i < NUM_DAISY_MOTORS; i++)
+        fb_received_bus1[i] = false;
 }
