@@ -1,9 +1,5 @@
 # Teensy examples
 
-<p align="center">
-  <img src="../setup.jpeg" alt="Setup: three Robstride O2 motors on a bench with control board and wiring" width="800"/>
-</p>
-
 Arduino/Teensy sketches for the Spine Board (Teensy 4.1 + Ethernet + CAN). These are **not** built by the repo’s CMake; open and upload them from the Arduino IDE or PlatformIO.
 
 Host apps (PC) live in **`../apps/`** and are built by CMake. After building, run the executables from `../build/`.

@@ -1,5 +1,9 @@
 ## Teensy-Spine-Board
 
+<p align="center">
+  <img src="setup.jpeg" alt="Setup: three Robstride O2 motors on a bench with control board and wiring" width="800"/>
+</p>
+
 Teensy 4.1 Ethernet–UDP to CAN bus bridge and C++ host demos for Robstride O2 actuators (extended 29‑bit CAN protocol). Supports 1–3 motors on Can0 (daisy chain); firmware waits for Type 2 feedback from all configured motors before accepting the next UDP batch.
 
 ### Repository layout
