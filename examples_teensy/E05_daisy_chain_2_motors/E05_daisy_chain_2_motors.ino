@@ -455,7 +455,6 @@ static uint32_t getO2CanId(uint8_t node_index, const uint8_t *cmd8) {
 
 void sendCANCMD()
 {
-    unsigned long now = micros();
     for (int i = 0; i < MAX_NODES; i++)
     {
         CAN_message_t msg;
@@ -472,9 +471,9 @@ void sendCANCMD()
         memcpy(msg2.buf, can_command_bus2[i], 8);
 
         Can0.write(msg);
-        last_cmd_time_bus1[i] = now;
+        last_cmd_time_bus1[i] = micros();
         Can1.write(msg2);
-        last_cmd_time_bus2[i] = now;
+        last_cmd_time_bus2[i] = micros();
     }
 }
 void sendUDPPacket()
