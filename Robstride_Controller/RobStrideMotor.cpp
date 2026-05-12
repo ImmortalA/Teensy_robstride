@@ -10,7 +10,8 @@ static constexpr uint8_t kCmdEnable = 3;
 static constexpr uint8_t kCmdStop = 4;
 static constexpr uint8_t kCmdZero = 6;
 static constexpr uint8_t kCmdGetStatus = 15;
-static constexpr uint16_t kA_run = 0x7005, kA_iq = 0x7006, kA_spd = 0x700A, kA_pos = 0x7016;
+static constexpr uint16_t kA_run = 0x7005;
+static constexpr uint32_t kRunModeOperationControl = 0;
 
 bool RobStrideMotor::s_global_estop = false;
 uint32_t RobStrideMotor::s_last_bus_send_us_ = 0;
@@ -27,13 +28,12 @@ uint32_t RobStrideMotor::s_can_tx_fails = 0;
 #endif
 static constexpr float kJumpMaxPos = 1.0f;
 static constexpr float kPi = 3.1415926f;
-static const MotorParams kP00 = {-4 * kPi, 4 * kPi, -33, 33, -14, 14, -15.5f, 15.5f};
-static const MotorParams kP01 = {-4 * kPi, 4 * kPi, -44, 44, -17, 17, -23, 23};
-static const MotorParams kP02 = {-4 * kPi, 4 * kPi, -44, 44, -17, 17, -23, 23};
-static const MotorParams kP03 = {-4 * kPi, 4 * kPi, -20, 20, -60, 60, -43, 43};
-static const MotorParams kP04 = {-4 * kPi, 4 * kPi, -15, 15, -120, 120, -90, 90};
-static const MotorParams kP06 = {-4 * kPi, 4 * kPi, -50, 50, -36, 36, -23, 23};
-static constexpr float kKp0 = 0, kKp1 = 500, kKd0 = 0, kKd1 = 5;
+static const MotorParams kP00 = {-4 * kPi, 4 * kPi, -33, 33, -14, 14, 0, 500, 0, 5};
+static const MotorParams kP01 = {-4 * kPi, 4 * kPi, -44, 44, -17, 17, 0, 500, 0, 5};
+static const MotorParams kP02 = {-4 * kPi, 4 * kPi, -44, 44, -17, 17, 0, 500, 0, 5};
+static const MotorParams kP03 = {-4 * kPi, 4 * kPi, -20, 20, -60, 60, 0, 500, 0, 5};
+static const MotorParams kP04 = {-4 * kPi, 4 * kPi, -15, 15, -120, 120, 0, 500, 0, 5};
+static const MotorParams kP06 = {-4 * kPi, 4 * kPi, -50, 50, -36, 36, 0, 5000, 0, 100};
 static constexpr uint8_t kCmdStatus = 2;
 
 static uint16_t floatToUint_s(float x, float x_min, float x_max, int bits) {
@@ -42,7 +42,7 @@ static uint16_t floatToUint_s(float x, float x_min, float x_max, int bits) {
   if (x < x_min) x = x_min;
   float span = x_max - x_min;
   float scaled = (x - x_min) * ((float)((1u << bits) - 1u)) / span;
-  return (uint16_t)(scaled + 0.5f);
+  return (uint16_t)scaled;
 }
 static float uintToFloat_s(uint16_t x, float x_min, float x_max) {
   return ((float)x / 65535.0f) * (x_max - x_min) + x_min;
@@ -56,7 +56,7 @@ static bool canTxFrame(uint32_t id, const uint8_t* d) {
   m.id = id;
   m.len = 8;
   memcpy(m.buf, d, 8);
-  return (Can0.write(m) >= 0);
+  return (Can0.write(m) > 0);
 }
 
 static uint32_t g_dec_uninited_ms[8];
@@ -135,86 +135,23 @@ bool RobStrideMotor::sendNow_(uint8_t cmd, uint16_t opt, const uint8_t* d, bool 
 
 bool RobStrideMotor::sendOneRamU32_(uint16_t addr, uint32_t raw) {
   uint8_t b[8] = {0};
-  b[0] = (uint8_t)addr;
-  b[1] = (uint8_t)(addr >> 8);
   b[4] = (uint8_t)raw;
   b[5] = (uint8_t)(raw >> 8);
   b[6] = (uint8_t)(raw >> 16);
   b[7] = (uint8_t)(raw >> 24);
-  return sendNow_(kCmdRamWrite, master_id_, b, false);
-}
-
-bool RobStrideMotor::sendOneRamFloat_(uint16_t addr, float value) {
-  if (!isfiniteCmd_(value)) {
-    metrics_.invalid_float_in++;
-    return false;
-  }
-  static_assert(sizeof(float) == 4, "");
-  uint32_t raw = 0;
-  memcpy(&raw, &value, 4);
-  return sendOneRamU32_(addr, raw);
-}
-
-void RobStrideMotor::sendOrQueueRamFloat_(uint16_t addr, float value, uint8_t pt) {
-  if (!inited_) {
-    notInited_();
-    return;
-  }
-  if (s_global_estop) {
-    estopBlock_();
-    return;
-  }
-  if (state_ != MotorState::RUNNING) {
-    stateBlock_();
-    return;
-  }
-  if (!isfiniteCmd_(value)) {
-    metrics_.invalid_float_in++;
-    return;
-  }
-  if (busWouldBlock_(false)) {
-    float v = clamp(value, (pt == PEND_POS)   ? params_.P_MIN
-                           : (pt == PEND_VEL) ? params_.V_MIN
-                                              : params_.IQ_MIN,
-                   (pt == PEND_POS)   ? params_.P_MAX
-                           : (pt == PEND_VEL) ? params_.V_MAX
-                                              : params_.IQ_MAX);
-    pend_type_ = pt;
-    pend0_ = v;
-    metrics_.throttle_coalesced++;
-    return;
-  }
-  if (pt == PEND_POS) {
-    float c = clamp(value, params_.P_MIN, params_.P_MAX);
-    if (!sendOneRamFloat_(addr, c)) {
-      pend_type_ = PEND_POS;
-      pend0_ = c;
-    }
-  } else if (pt == PEND_VEL) {
-    float c = clamp(value, params_.V_MIN, params_.V_MAX);
-    if (!sendOneRamFloat_(addr, c)) {
-      pend_type_ = PEND_VEL;
-      pend0_ = c;
-    }
-  } else {
-    float c = clamp(value, params_.IQ_MIN, params_.IQ_MAX);
-    if (!sendOneRamFloat_(addr, c)) {
-      pend_type_ = PEND_IQ;
-      pend0_ = c;
-    }
-  }
+  return sendNow_(kCmdRamWrite, addr, b, false);
 }
 
 void RobStrideMotor::buildMotion8_(uint8_t o[8], uint16_t* t_opt, float pos, float vel, float kp, float kd, float tq) {
   float p = clamp(pos, params_.P_MIN, params_.P_MAX);
   float v = clamp(vel, params_.V_MIN, params_.V_MAX);
-  float kpp = clamp(kp, kKp0, kKp1);
-  float kdd = clamp(kd, kKd0, kKd1);
+  float kpp = clamp(kp, params_.KP_MIN, params_.KP_MAX);
+  float kdd = clamp(kd, params_.KD_MIN, params_.KD_MAX);
   float t = clamp(tq, params_.T_MIN, params_.T_MAX);
   uint16_t pu = floatToUint_s(p, params_.P_MIN, params_.P_MAX, 16);
   uint16_t vu = floatToUint_s(v, params_.V_MIN, params_.V_MAX, 16);
-  uint16_t ku = floatToUint_s(kpp, kKp0, kKp1, 16);
-  uint16_t du = floatToUint_s(kdd, kKd0, kKd1, 16);
+  uint16_t ku = floatToUint_s(kpp, params_.KP_MIN, params_.KP_MAX, 16);
+  uint16_t du = floatToUint_s(kdd, params_.KD_MIN, params_.KD_MAX, 16);
   uint16_t tu = floatToUint_s(t, params_.T_MIN, params_.T_MAX, 16);
   o[0] = (uint8_t)(pu >> 8);
   o[1] = (uint8_t)pu;
@@ -277,17 +214,6 @@ void RobStrideMotor::tryFlushPending_() {
     buildMotion8_(o, &tu, pend0_, pend1_, pend2_, pend3_, pend4_);
     if (sendNow_(kCmdMotion, tu, o, false)) pend_type_ = PEND_NONE;
     return;
-  }
-  if (pt == PEND_POS) {
-    if (sendOneRamFloat_(kA_pos, pend0_)) pend_type_ = PEND_NONE;
-    return;
-  }
-  if (pt == PEND_VEL) {
-    if (sendOneRamFloat_(kA_spd, pend0_)) pend_type_ = PEND_NONE;
-    return;
-  }
-  if (pt == PEND_IQ) {
-    if (sendOneRamFloat_(kA_iq, pend0_)) pend_type_ = PEND_NONE;
   }
 }
 
@@ -378,11 +304,39 @@ void RobStrideMotor::enable() {
     stateBlock_();
     return;
   }
-  shortSpinForBus_();
   uint8_t z[8] = {0};
+
+  // Match the known-good RobStride private startup sequence:
+  // Type 4 stop/reset, Type 18 RUN_MODE=operation, then Type 3 enable.
+  if (!sendNow_(kCmdStop, master_id_, z, true)) return;
+  delay(50);
+  last_send_us_ = 0;
+  s_last_bus_send_us_ = 0;
+
+  if (!sendOneRamU32_(kA_run, kRunModeOperationControl)) return;
+  delay(50);
+  last_send_us_ = 0;
+  s_last_bus_send_us_ = 0;
+
   if (!sendNow_(kCmdEnable, master_id_, z, false)) return;
+  delay(50);
   if (s_global_estop) return;
-  state_ = MotorState::RUNNING;
+
+  uint32_t feedbackStampBefore = status_.stamp_us;
+  requestStatus();
+  for (uint8_t i = 0; i < 5; i++) {
+    delay(10);
+    Can0.events();
+    if (status_.valid && status_.stamp_us != feedbackStampBefore) break;
+  }
+
+  if (status_.valid && status_.stamp_us != feedbackStampBefore && !fault_.has_fault) {
+    state_ = MotorState::RUNNING;
+  } else if (fault_.has_fault) {
+    state_ = MotorState::FAULT;
+  } else {
+    state_ = MotorState::READY;
+  }
 }
 
 void RobStrideMotor::stop() {
@@ -423,35 +377,6 @@ void RobStrideMotor::zero() {
   (void)sendNow_(kCmdZero, master_id_, d, false);
 }
 
-void RobStrideMotor::setRunMode(RunMode mode) {
-  if (!inited_) {
-    notInited_();
-    return;
-  }
-  if (s_global_estop) {
-    estopBlock_();
-    return;
-  }
-  if (state_ == MotorState::FAULT || state_ == MotorState::ESTOP) {
-    stateBlock_();
-    return;
-  }
-  if (state_ != MotorState::READY && state_ != MotorState::RUNNING) {
-    stateBlock_();
-    return;
-  }
-  shortSpinForBus_();
-  uint8_t d[8] = {0};
-  d[0] = (uint8_t)kA_run;
-  d[1] = (uint8_t)(kA_run >> 8);
-  d[4] = (uint8_t)mode;
-  (void)sendNow_(kCmdRamWrite, master_id_, d, false);
-}
-
-void RobStrideMotor::setPosition(float x) { sendOrQueueRamFloat_(kA_pos, x, PEND_POS); }
-void RobStrideMotor::setVelocity(float x) { sendOrQueueRamFloat_(kA_spd, x, PEND_VEL); }
-void RobStrideMotor::setCurrent(float x) { sendOrQueueRamFloat_(kA_iq, x, PEND_IQ); }
-
 void RobStrideMotor::motion(float pos, float vel, float kp, float kd, float tq) { sendOrQueueMotion_(pos, vel, kp, kd, tq); }
 
 void RobStrideMotor::requestStatus() {
@@ -489,7 +414,7 @@ bool RobStrideMotor::decodeFeedback(const CAN_message_t& msg) {
   }
   if (!msg.flags.extended || msg.len != 8) return false;
   uint8_t cmd = (uint8_t)((msg.id >> 24) & 0xFFu);
-  uint8_t mid = (uint8_t)(msg.id & 0xFFu);
+  uint8_t mid = (uint8_t)((msg.id >> 8) & 0xFFu);
   if (mid != id_ || cmd != kCmdStatus) return false;
   uint16_t opt = (uint16_t)((msg.id >> 8) & 0xFFFFu);
   uint8_t oh = (uint8_t)(opt >> 8);
@@ -501,7 +426,6 @@ bool RobStrideMotor::decodeFeedback(const CAN_message_t& msg) {
   fault_.magnetic_coding = (fb >> 2) & 1;
   fault_.overtemperature = (fb >> 1) & 1;
   fault_.three_phase_overcurrent = fb & 1;
-  fault_.undervoltage = false;
   uint16_t rp = (uint16_t)msg.buf[1] | (uint16_t)msg.buf[0] << 8;
   uint16_t rv = (uint16_t)msg.buf[3] | (uint16_t)msg.buf[2] << 8;
   uint16_t rt = (uint16_t)msg.buf[5] | (uint16_t)msg.buf[4] << 8;

@@ -18,5 +18,6 @@ Host PC apps for E03–E06 live under **`../apps/`** and are built from **`../CM
 | **E04_single_motor_feedback_timing** | same as E03 subset | `test_spine`, `comm_test`, `test_spine_mit` | Timing / single motor. |
 | **E05_daisy_chain_2_motors** | `demo03_daisy_chain_2_motors.cpp` | `daisy_chain_2_motors` | Two motors on Can0. |
 | **E06_daisy_chain_feedback_timing** | `demo03_daisy_chain_2_motors.cpp` | `daisy_chain_2_motors` | Daisy timing. |
+| **E07_teensy_only_mit_sine** | — | — | **Standalone.** Enable + Type 18 RUN_MODE + MIT Type 1 sine; choose a RobStride motor model in the sketch. |
 
 Network: see **`../ETHERNET_SETUP.md`**.

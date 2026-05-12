@@ -9,7 +9,7 @@ This folder is **not** part of the main RobStride Serial/CAN workflow at the rep
 | `teensy/teensy.ino` | Teensy firmware: UDP ↔ CAN (Robstride O2 style bridge). |
 | `apps/` | PC executables (`main.cpp`, demos); build with CMake. |
 | `spine_board.cpp`, `spine_board.h`, `utils.h` | Host UDP client and helpers. |
-| `CMakeLists.txt` | Builds `apps/` against `spine_board` (expects `robstride_o2/` if present in your tree). |
+| `CMakeLists.txt` | Builds `apps/` against `spine_board`. |
 | `ETHERNET_SETUP.md` | PC ↔ Teensy network notes. |
 | `examples_teensy/` | Sketches E01–E06 (see `examples_teensy/README.md` inside this folder). |
 | `data/` | Frequency logs, plot script (`plot_frequency.py`), and sample CSV/PNG outputs. |
@@ -22,8 +22,6 @@ mkdir -p build && cd build
 cmake ..
 make -j4
 ```
-
-If CMake reports missing **`robstride_o2/`**, restore or vendor that library from your older checkout; it was referenced by the original top-level `CMakeLists.txt`.
 
 ## RobStride Serial controller
 

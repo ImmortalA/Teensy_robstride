@@ -1,5 +1,4 @@
 #include "spine_board.h"
-#include "robstride_o2/robstride_o2_motor.h"
 #include <cmath>
 #include <chrono>
 #include <limits>

@@ -4,8 +4,6 @@
 #include <Arduino.h>
 #include <FlexCAN_T4.h>
 
-enum class RunMode : uint8_t { Motion = 0, Position = 1, Velocity = 2, Current = 3 };
-
 enum class RobStrideMotorModel : uint8_t {
   RS00 = 0, RS01 = 1, RS02 = 2, RS03 = 3, RS04 = 4, RS06 = 6
 };
@@ -14,7 +12,8 @@ enum class RobStrideMotorModel : uint8_t {
 enum class MotorState : uint8_t { UNINIT, READY, RUNNING, FAULT, ESTOP };
 
 struct MotorParams {
-  float P_MIN, P_MAX, V_MIN, V_MAX, T_MIN, T_MAX, IQ_MIN, IQ_MAX;
+  float P_MIN, P_MAX, V_MIN, V_MAX, T_MIN, T_MAX;
+  float KP_MIN, KP_MAX, KD_MIN, KD_MAX;
 };
 
 struct Status {
@@ -26,7 +25,6 @@ struct Status {
 struct FaultFlags {
   bool has_fault = false, encoder_not_calibrated = false, gridlock_overload = false;
   bool magnetic_coding = false, overtemperature = false, three_phase_overcurrent = false;
-  bool undervoltage = false;
 };
 
 /** Cumulative; safe to read from any context; do not use Serial in ISR. */
@@ -59,10 +57,6 @@ public:
   void enable();
   void stop();
   void zero();
-  void setRunMode(RunMode mode);
-  void setPosition(float rad);
-  void setVelocity(float rad_s);
-  void setCurrent(float amps);
   void motion(float pos, float vel, float kp, float kd, float torque_ff);
 
   void requestStatus();
@@ -111,7 +105,7 @@ private:
   static uint32_t s_last_bus_send_us_;
   static uint32_t s_can_tx_fails;
 
-  enum : uint8_t { PEND_NONE, PEND_POS, PEND_VEL, PEND_IQ, PEND_MOTION };
+  enum : uint8_t { PEND_NONE, PEND_MOTION };
   uint8_t pend_type_;
   float pend0_, pend1_, pend2_, pend3_, pend4_;
 
@@ -120,11 +114,9 @@ private:
   bool busWouldBlock_(bool is_stop) const;
   void markBusTx_();
   void shortSpinForBus_();
-  void sendOrQueueRamFloat_(uint16_t addr, float value, uint8_t pend_t);
   void sendOrQueueMotion_(float pos, float vel, float kp, float kd, float tq);
   void tryFlushPending_();
   bool sendOneRamU32_(uint16_t addr, uint32_t raw);
-  bool sendOneRamFloat_(uint16_t addr, float value);
   void buildMotion8_(uint8_t out8[8], uint16_t* t_opt, float p, float v, float kp, float kd, float tq);
   bool sendNow_(uint8_t cmd, uint16_t opt, const uint8_t* data, bool is_stop);
   void notInited_();

@@ -31,10 +31,10 @@ static constexpr bool SERIAL_CMD_ACK = true;
 
 static constexpr uint32_t SYNC_STAGGER_US = 200;
 static constexpr uint32_t FOR_EACH_GAP_US = 200;
+static constexpr float JOG_MAX_TARGET_ERROR_RAD = 0.5f;
 
-static constexpr uint8_t MOTOR_IDS[] = {1, 2};
-static constexpr RobStrideMotorModel MOTOR_MODELS[] = {
-    RobStrideMotorModel::RS06, RobStrideMotorModel::RS06};
+static constexpr uint8_t MOTOR_IDS[] = {1};
+static constexpr RobStrideMotorModel MOTOR_MODELS[] = {RobStrideMotorModel::RS06};
 
 // ================================================================
 // 3. MOTOR OBJECTS / GLOBAL STATE
@@ -61,6 +61,13 @@ static char lineBuf[192];
 static int nbuf = 0;
 static bool lineOverflow = false;
 
+static bool jogOn = false;
+static float jogVel = 0.0f;
+static float jogTarget = 0.0f;
+static float jogKp = 10.0f;
+static float jogKd = 1.0f;
+static uint32_t lastJogUs = 0;
+
 // ================================================================
 // 4. FUNCTION DECLARATIONS (PROTOTYPES)
 // ================================================================
@@ -74,6 +81,7 @@ void handleCommand(const String& line);
 void serviceMotors();
 void checkWatchdog();
 void streamStatus();
+void serviceJog();
 void printHelp();
 
 // --- Internal
@@ -92,10 +100,9 @@ void emitHeartbeatIfNeeded(uint32_t now);
 static bool extraArgs(char** ctx);
 static bool pu32(const char* s, uint32_t& o);
 static bool pf(const char* s, float& o);
-static int8_t parseMode(const char* s);
 static bool tok5(char** ctx, float& p, float& v, float& kp, float& kd, float& tq);
-static bool allFiniteSyncScalars(const float* vals, int count);
 static RobStrideMotor* motorById(uint8_t id);
+static bool feedbackForCommand(RobStrideMotor* motor, Status& status);
 
 // ================================================================
 // 5. SETUP + LOOP (TOP, EASY TO SEE)
@@ -116,6 +123,7 @@ void loop() {
   const uint32_t now = millis();
   RobStrideMotor::pollAllHealth(motors, NUM_MOTORS, FEEDBACK_TIMEOUT_MS);
   serviceMotors();
+  serviceJog();
   logThrottleDropsIfNeeded();
   readSerial();
   checkWatchdog();
@@ -138,8 +146,7 @@ void initCan() {
   Can0.begin();
   Can0.setBaudRate(CAN_BAUD);
   Can0.setMaxMB(16);
-  Can0.enableFIFO();
-  Can0.setClock(CLK_60MHz);
+  Can0.enableMBInterrupts();
   Can0.onReceive(onCan);
 }
 
@@ -160,7 +167,7 @@ void printStartupBanner() {
   Serial.printf("NUM_MOTORS = %d\r\nIDs:", NUM_MOTORS);
   for (int i = 0; i < NUM_MOTORS; i++) Serial.printf(" %u", (unsigned)MOTOR_IDS[i]);
   Serial.println();
-  Serial.println(F("Tip: type  help  — per-motor commands need an id (e.g.  enable 1  or  all enable )."));
+  Serial.println(F("Tip: type  help  — this sketch is configured for motor id 1."));
 }
 
 void initMotors() {
@@ -183,41 +190,40 @@ void initMotors() {
 
 // --- printHelp
 void printHelp() {
-  Serial.println(F("=== RobStride serial commands ==="));
+  Serial.println(F("=== RobStride one-motor control (id=1) ==="));
   Serial.println(F(""));
-  Serial.println(F("--- Quick start (one motor, id=1) ---"));
-  Serial.println(F("  reset"));
-  Serial.println(F("  enable 1"));
-  Serial.println(F("  mode 1 velocity          <- word must be: velocity | position | current | motion"));
-  Serial.println(F("  vel 1 0.5                <- setpoint in rad/s (not RPM)"));
-  Serial.println(F("  stream 1 100              <- optional: prints feedback incl. velocity"));
+  Serial.println(F("--- Safe start ---"));
+  Serial.println(F("  reset                    clear host estop"));
+  Serial.println(F("  enable 1                 enable drive in operation-control mode"));
+  Serial.println(F("  stream 1 100             print feedback every 100 ms"));
   Serial.println(F(""));
-  Serial.println(F("--- Velocity (per motor) ---"));
-  Serial.println(F("  1) enable <id>     2) mode <id> velocity     3) vel <id> <rad/s>"));
-  Serial.println(F("  Use full word  velocity  in mode (  mode 1 vel  is wrong)."));
-  Serial.println(F("  Stop:  vel <id> 0   or   stop <id>"));
+  Serial.println(F("--- Motion commands (all use working Type-1 path) ---"));
+  Serial.println(F("  move 1 <rad> [kp] [kd]      absolute position, defaults kp=10 kd=1"));
+  Serial.println(F("  nudge 1 <rad> [kp] [kd]     relative move from current feedback"));
+  Serial.println(F("  jog 1 <rad/s> [kp] [kd]     continuous velocity, defaults kp=10 kd=1"));
+  Serial.println(F("  jog 1 0                     stop jogging"));
+  Serial.println(F("  torque 1 <Nm>               torque feedforward at current position"));
+  Serial.println(F("  motion 1 <p> <v> <kp> <kd> <tq>   raw Type-1 command"));
   Serial.println(F(""));
-  Serial.println(F("--- Velocity (all motors, same order as MOTOR_IDS[]) ---"));
-  Serial.println(F("  all enable"));
-  Serial.println(F("  mode 1 velocity          (repeat for each id if needed)"));
-  Serial.println(F("  sync vel <m0> <m1> ...     one rad/s per motor, e.g. two motors:  sync vel 0.2 -0.2"));
+  Serial.println(F("--- Good first tests ---"));
+  Serial.println(F("  nudge 1 0.2 10 1"));
+  Serial.println(F("  jog 1 0.2"));
+  Serial.println(F("  jog 1 0"));
+  Serial.println(F("  torque 1 0.3"));
   Serial.println(F(""));
-  Serial.println(F("--- Position / torque (per motor) ---"));
-  Serial.println(F("  mode 1 position          then  pos 1 <rad>"));
-  Serial.println(F("  mode 1 current           then  cur 1 <A>"));
-  Serial.println(F("  mode 1 motion            then  motion 1 <p> <v> <kp> <kd> <tq>"));
+  Serial.println(F("--- Stop / recovery ---"));
+  Serial.println(F("  stop 1                    stop motor output"));
+  Serial.println(F("  estop                     host estop + stop"));
+  Serial.println(F("  reset                     clear host estop; run enable 1 after estop"));
+  Serial.println(F("  recover 1                 host recover if fault flag cleared"));
   Serial.println(F(""));
-  Serial.println(F("--- Per-motor (replace 1 with CAN id from MOTOR_IDS) ---"));
-  Serial.println(F("  enable 1   stop 1   zero 1   status 1   fault 1   recover 1"));
+  Serial.println(F("--- Feedback / diagnostics ---"));
+  Serial.println(F("  status 1                  request one feedback frame"));
+  Serial.println(F("  fault 1                   print decoded fault bits"));
+  Serial.println(F("  diag                      print host state and counters"));
+  Serial.println(F("  stream 0                  stop streaming"));
   Serial.println(F(""));
-  Serial.println(F("--- All motors (no id on these lines) ---"));
-  Serial.println(F("  all enable   all stop   all zero   all status"));
-  Serial.println(F(""));
-  Serial.println(F("--- Other ---"));
-  Serial.println(F("  sync pos|vel|cur <values...>     sync motion <5 floats per motor...>"));
-  Serial.println(F("  stream 0|1 [ms]   diag   estop   reset | estop_reset   help"));
-  Serial.println(F(""));
-  Serial.println(F("If estop or [WARN] wd:  reset  then  enable  again."));
+  Serial.println(F("Notes: old pos/vel/cur RAM-mode commands are intentionally removed."));
 }
 
 // --- CAN
@@ -289,6 +295,32 @@ void streamStatus() {
   }
 }
 
+void serviceJog() {
+  if (!jogOn || estop || NUM_MOTORS != 1) return;
+
+  uint32_t nowUs = micros();
+  if (lastJogUs == 0) {
+    lastJogUs = nowUs;
+    return;
+  }
+
+  uint32_t dtUs = nowUs - lastJogUs;
+  if (dtUs < 10000) return;
+  lastJogUs = nowUs;
+
+  float dt = (float)dtUs * 1.0e-6f;
+  jogTarget += jogVel * dt;
+
+  Status s = motors[0].getStatus();
+  if (s.valid) {
+    float err = jogTarget - s.position;
+    if (err > JOG_MAX_TARGET_ERROR_RAD) jogTarget = s.position + JOG_MAX_TARGET_ERROR_RAD;
+    else if (err < -JOG_MAX_TARGET_ERROR_RAD) jogTarget = s.position - JOG_MAX_TARGET_ERROR_RAD;
+  }
+
+  motors[0].motion(jogTarget, jogVel, jogKp, jogKd, 0.0f);
+}
+
 // --- Serial line input
 void readSerial() {
   while (Serial.available()) {
@@ -353,7 +385,14 @@ void printDiagnostics() {
     Serial.print(F(" ni="));
     Serial.print((unsigned long)m.not_inited_cmds);
     Serial.print(F(" inv="));
-    Serial.println((unsigned long)m.invalid_float_in);
+    Serial.print((unsigned long)m.invalid_float_in);
+    Status s = motors[i].getStatus();
+    Serial.print(F(" fb="));
+    Serial.print(s.valid ? 1 : 0);
+    Serial.print(F(" p="));
+    Serial.print(s.position, 4);
+    Serial.print(F(" vel="));
+    Serial.println(s.velocity, 4);
   }
 }
 
@@ -376,14 +415,6 @@ static bool pf(const char* s, float& o) {
   return (e != s) && isfinite(o);
 }
 
-static int8_t parseMode(const char* s) {
-  if (!strcmp(s, "motion")) return 0;
-  if (!strcmp(s, "position")) return 1;
-  if (!strcmp(s, "velocity")) return 2;
-  if (!strcmp(s, "current")) return 3;
-  return -1;
-}
-
 static bool tok5(char** ctx, float& p, float& v, float& kp, float& kd, float& tq) {
   char *a, *b, *c, *d, *e;
   a = strtok_r(nullptr, " \t\r\n", ctx);
@@ -394,16 +425,22 @@ static bool tok5(char** ctx, float& p, float& v, float& kp, float& kd, float& tq
   return a && b && c && d && e && pf(a, p) && pf(b, v) && pf(c, kp) && pf(d, kd) && pf(e, tq);
 }
 
-static bool allFiniteSyncScalars(const float* vals, int count) {
-  for (int i = 0; i < count; i++)
-    if (!isfinite(vals[i])) return false;
-  return true;
-}
-
 static RobStrideMotor* motorById(uint8_t id) {
   for (int i = 0; i < NUM_MOTORS; i++)
     if (motors[i].id() == id) return &motors[i];
   return nullptr;
+}
+
+static bool feedbackForCommand(RobStrideMotor* motor, Status& status) {
+  status = motor->getStatus();
+  if (status.valid) return true;
+
+  motor->requestStatus();
+  delay(10);
+  Can0.events();
+
+  status = motor->getStatus();
+  return status.valid || status.stamp_us != 0;
 }
 
 void extraStagger() { delayMicroseconds(SYNC_STAGGER_US); }
@@ -437,10 +474,11 @@ void parseCommandLine(char* line) {
       Serial.println(F("[ERR] bad_args"));
       return;
     }
+    jogOn = false;
     estop = false;
     RobStrideMotor::setGlobalEstop(false);
     for (int i = 0; i < NUM_MOTORS; i++) motors[i].onHostEstopRelease();
-    Serial.println(F("reset host"));
+    Serial.println(F("reset host; run enable 1 after estop"));
     return;
   }
 
@@ -449,6 +487,7 @@ void parseCommandLine(char* line) {
       Serial.println(F("[ERR] bad_args"));
       return;
     }
+    jogOn = false;
     estop = true;
     RobStrideMotor::setGlobalEstop(true);
     for (int i = 0; i < NUM_MOTORS; i++) motors[i].onHostEstop();
@@ -485,135 +524,10 @@ void parseCommandLine(char* line) {
     return;
   }
 
-  if (!strcmp(cmd, "all")) {
-    char* a = strtok_r(nullptr, " \t\r\n", &ctx);
-    if (!a) {
-      Serial.println(F("[ERR] bad_args"));
-      return;
-    }
-    if (!strcmp(a, "enable")) {
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] bad_args"));
-        return;
-      }
-      if (!estop) {
-        for (int i = 0; i < NUM_MOTORS; i++) {
-          motors[i].enable();
-          delayMicroseconds(FOR_EACH_GAP_US);
-        }
-        armWatchdog();
-      }
-      return;
-    }
-    if (!strcmp(a, "stop")) {
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] bad_args"));
-        return;
-      }
-      forEach(&RobStrideMotor::stop);
-      armWatchdog();
-      return;
-    }
-    if (!strcmp(a, "zero")) {
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] bad_args"));
-        return;
-      }
-      if (!estop) {
-        for (int i = 0; i < NUM_MOTORS; i++) {
-          motors[i].zero();
-          extraStagger();
-        }
-        armWatchdog();
-      }
-      return;
-    }
-    if (!strcmp(a, "status")) {
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] bad_args"));
-        return;
-      }
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        motors[i].requestStatus();
-        extraStagger();
-      }
-      return;
-    }
-    Serial.println(F("[ERR] bad_cmd"));
-    return;
-  }
-
-  if (!strcmp(cmd, "sync")) {
-    char* sub = strtok_r(nullptr, " \t\r\n", &ctx);
-    if (!sub) {
-      Serial.println(F("[ERR] bad_args"));
-      return;
-    }
-    if (estop) return;
-
-    if (!strcmp(sub, "pos") || !strcmp(sub, "vel") || !strcmp(sub, "cur")) {
-      float vals[NUM_MOTORS];
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        char* t = strtok_r(nullptr, " \t\r\n", &ctx);
-        if (!t || !pf(t, vals[i])) {
-          Serial.println(F("[ERR] sync_err"));
-          return;
-        }
-      }
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] sync_extra"));
-        return;
-      }
-      if (!allFiniteSyncScalars(vals, NUM_MOTORS)) {
-        Serial.println(F("[ERR] invalid number"));
-        return;
-      }
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        if (!strcmp(sub, "pos")) motors[i].setPosition(vals[i]);
-        else if (!strcmp(sub, "vel")) motors[i].setVelocity(vals[i]);
-        else motors[i].setCurrent(vals[i]);
-        extraStagger();
-      }
-      serviceMotors();
-      armWatchdog();
-      return;
-    }
-
-    if (!strcmp(sub, "motion")) {
-      float p[NUM_MOTORS], v[NUM_MOTORS], kp[NUM_MOTORS], kd[NUM_MOTORS], tq[NUM_MOTORS];
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        if (!tok5(&ctx, p[i], v[i], kp[i], kd[i], tq[i])) {
-          Serial.println(F("[ERR] sync_err"));
-          return;
-        }
-      }
-      if (extraArgs(&ctx)) {
-        Serial.println(F("[ERR] sync_extra"));
-        return;
-      }
-      if (!allFiniteSyncScalars(p, NUM_MOTORS) || !allFiniteSyncScalars(v, NUM_MOTORS) || !allFiniteSyncScalars(kp, NUM_MOTORS) ||
-          !allFiniteSyncScalars(kd, NUM_MOTORS) || !allFiniteSyncScalars(tq, NUM_MOTORS)) {
-        Serial.println(F("[ERR] invalid number"));
-        return;
-      }
-      for (int i = 0; i < NUM_MOTORS; i++) {
-        motors[i].motion(p[i], v[i], kp[i], kd[i], tq[i]);
-        extraStagger();
-      }
-      serviceMotors();
-      armWatchdog();
-      return;
-    }
-
-    Serial.println(F("[ERR] bad_cmd"));
-    return;
-  }
-
   char* ids = strtok_r(nullptr, " \t\r\n", &ctx);
   if (!ids) {
     Serial.println(F("[ERR] bad_args (missing motor id or extra words?)"));
-    Serial.println(F("hint:  enable 1   not just \"enable\" — id is the drive CAN node (see MOTOR_IDS)."));
-    Serial.println(F("       or use:  all enable   for every motor."));
+    Serial.println(F("hint: this sketch is configured for one motor: use id 1, e.g. enable 1"));
     return;
   }
   uint32_t idu;
@@ -651,6 +565,7 @@ void parseCommandLine(char* line) {
       Serial.println(F("[ERR] bad_args"));
       return;
     }
+    jogOn = false;
     m->stop();
     armWatchdog();
     return;
@@ -665,34 +580,26 @@ void parseCommandLine(char* line) {
     return;
   }
 
-  if (!strcmp(cmd, "mode")) {
-    char* mo = strtok_r(nullptr, " \t\r\n", &ctx);
-    if (!mo) {
+  if (!strcmp(cmd, "move")) {
+    char* ptxt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (!ptxt) {
       Serial.println(F("[ERR] bad_args"));
       return;
     }
-    int8_t md = parseMode(mo);
-    if (md < 0) {
-      Serial.println(F("[ERR] bad_args"));
+    float p;
+    if (!pf(ptxt, p)) {
+      Serial.println(F("[ERR] invalid number"));
       return;
     }
-    if (extraArgs(&ctx)) {
-      Serial.println(F("[ERR] bad_args"));
+    float kp = 10.0f;
+    float kd = 1.0f;
+    char* kpt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kpt && !pf(kpt, kp)) {
+      Serial.println(F("[ERR] invalid number"));
       return;
     }
-    if (!estop) m->setRunMode((RunMode)md);
-    if (!estop) armWatchdog();
-    return;
-  }
-
-  if (!strcmp(cmd, "pos") || !strcmp(cmd, "vel") || !strcmp(cmd, "cur")) {
-    char* t = strtok_r(nullptr, " \t\r\n", &ctx);
-    if (!t) {
-      Serial.println(F("[ERR] bad_args"));
-      return;
-    }
-    float x;
-    if (!pf(t, x)) {
+    char* kdt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kdt && !pf(kdt, kd)) {
       Serial.println(F("[ERR] invalid number"));
       return;
     }
@@ -701,18 +608,151 @@ void parseCommandLine(char* line) {
       return;
     }
     if (estop) return;
-    if (!strcmp(cmd, "pos")) m->setPosition(x);
-    else if (!strcmp(cmd, "vel")) m->setVelocity(x);
-    else m->setCurrent(x);
+    jogOn = false;
+    m->motion(p, 0.0f, kp, kd, 0.0f);
     m->servicePending();
     armWatchdog();
     if (SERIAL_CMD_ACK) {
-      Serial.print(F("[OK] "));
-      Serial.print(cmd);
-      Serial.print(' ');
-      Serial.print((unsigned)idu);
-      Serial.print(' ');
-      Serial.println(x, 5);
+      Serial.print(F("[OK] move target="));
+      Serial.println(p, 5);
+    }
+    return;
+  }
+
+  if (!strcmp(cmd, "torque")) {
+    char* t = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (!t) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    float tq;
+    if (!pf(t, tq)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    if (extraArgs(&ctx)) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    if (estop) return;
+
+    Status s;
+    if (!feedbackForCommand(m, s)) {
+      Serial.println(F("[ERR] no_feedback; run stream 1 100 or status 1, then retry"));
+      return;
+    }
+
+    jogOn = false;
+    m->motion(s.position, 0.0f, 0.0f, 0.0f, tq);
+    m->servicePending();
+    armWatchdog();
+    if (SERIAL_CMD_ACK) {
+      Serial.print(F("[OK] torque Nm="));
+      Serial.println(tq, 5);
+    }
+    return;
+  }
+
+  if (!strcmp(cmd, "jog")) {
+    char* v = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (!v) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    float vel;
+    if (!pf(v, vel)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    float kp = 10.0f;
+    float kd = 1.0f;
+    char* kpt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kpt && !pf(kpt, kp)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    char* kdt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kdt && !pf(kdt, kd)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    if (extraArgs(&ctx)) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    if (estop) return;
+
+    if (fabsf(vel) < 1.0e-6f) {
+      jogOn = false;
+      m->motion(jogTarget, 0.0f, kp, kd, 0.0f);
+      m->servicePending();
+      armWatchdog();
+      if (SERIAL_CMD_ACK) Serial.println(F("[OK] jog stop"));
+      return;
+    }
+
+    Status s;
+    if (!feedbackForCommand(m, s)) {
+      Serial.println(F("[ERR] no_feedback; run stream 1 100 or status 1, then retry"));
+      return;
+    }
+
+    jogVel = vel;
+    jogTarget = s.position;
+    jogKp = kp;
+    jogKd = kd;
+    lastJogUs = micros();
+    jogOn = true;
+    armWatchdog();
+    if (SERIAL_CMD_ACK) {
+      Serial.print(F("[OK] jog vel="));
+      Serial.println(jogVel, 5);
+    }
+    return;
+  }
+
+  if (!strcmp(cmd, "nudge")) {
+    char* d = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (!d) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    float delta;
+    if (!pf(d, delta)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    float kp = 10.0f;
+    float kd = 1.0f;
+    char* kpt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kpt && !pf(kpt, kp)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    char* kdt = strtok_r(nullptr, " \t\r\n", &ctx);
+    if (kdt && !pf(kdt, kd)) {
+      Serial.println(F("[ERR] invalid number"));
+      return;
+    }
+    if (extraArgs(&ctx)) {
+      Serial.println(F("[ERR] bad_args"));
+      return;
+    }
+    if (estop) return;
+
+    Status s;
+    if (!feedbackForCommand(m, s)) {
+      Serial.println(F("[ERR] no_feedback; run stream 1 100 or status 1, then retry"));
+      return;
+    }
+
+    jogOn = false;
+    m->motion(s.position + delta, 0.0f, kp, kd, 0.0f);
+    m->servicePending();
+    armWatchdog();
+    if (SERIAL_CMD_ACK) {
+      Serial.print(F("[OK] nudge target="));
+      Serial.println(s.position + delta, 5);
     }
     return;
   }
@@ -728,6 +768,7 @@ void parseCommandLine(char* line) {
       return;
     }
     if (estop) return;
+    jogOn = false;
     m->motion(p, v, kp, kd, tq);
     m->servicePending();
     armWatchdog();

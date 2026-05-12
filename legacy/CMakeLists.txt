@@ -9,22 +9,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(Threads REQUIRED)
 find_path(ASIO_INCLUDE_DIR asio.hpp)
 
-add_library(robstride_o2 STATIC robstride_o2/robstride_o2_motor.cpp)
-target_include_directories(robstride_o2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
-
 add_library(spine_board SHARED spine_board.cpp)
 target_include_directories(spine_board PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spine_board Threads::Threads)
 
 # Main demo executable (apps/main.cpp)
 add_executable(test_spine apps/main.cpp)
-target_link_libraries(test_spine spine_board robstride_o2)
-target_include_directories(test_spine PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
+target_link_libraries(test_spine spine_board)
+target_include_directories(test_spine PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 # MIT-only demo (apps/demo02_MIT.cpp)
 add_executable(test_spine_mit apps/demo02_MIT.cpp)
-target_link_libraries(test_spine_mit spine_board robstride_o2)
-target_include_directories(test_spine_mit PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
+target_link_libraries(test_spine_mit spine_board)
+target_include_directories(test_spine_mit PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Communication test (apps/demo01_comm_test.cpp)
 add_executable(comm_test apps/demo01_comm_test.cpp)
@@ -33,5 +30,5 @@ target_include_directories(comm_test PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT
 
 # Two motors on Can0 daisy chain (apps/demo03_daisy_chain_2_motors.cpp)
 add_executable(daisy_chain_2_motors apps/demo03_daisy_chain_2_motors.cpp)
-target_link_libraries(daisy_chain_2_motors spine_board robstride_o2)
-target_include_directories(daisy_chain_2_motors PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/robstride_o2)
+target_link_libraries(daisy_chain_2_motors spine_board)
+target_include_directories(daisy_chain_2_motors PRIVATE ${ASIO_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})

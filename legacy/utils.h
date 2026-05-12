@@ -3,6 +3,18 @@
 #include <cmath>
 #include <vector>
 #include <cstdio>
+#include <cstdint>
+
+// RobStride O2 parameter IDs (used with SpineBoard::sendParameterWriteU8). See vendor docs / Robstride_Controller.
+namespace O2ParamId
+{
+constexpr uint16_t RUN_MODE = 0x7005;
+}
+
+enum class O2ControlMode : uint8_t
+{
+    OperationControl = 0,
+};
 
 // Robostride O2 (extended CAN protocol: id|data|mode in 29-bit ID)
 #define P_MIN_ROBOSTRIDE_O2 -12.5f
