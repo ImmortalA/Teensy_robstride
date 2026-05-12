@@ -207,7 +207,7 @@ void printHelp() {
   Serial.println(F(""));
   Serial.println(F("--- Good first tests ---"));
   Serial.println(F("  nudge 1 0.2 10 1"));
-  Serial.println(F("  jog 1 0.2"));
+  Serial.println(F("  jog 1 0.5"));
   Serial.println(F("  jog 1 0"));
   Serial.println(F("  torque 1 0.3"));
   Serial.println(F(""));
